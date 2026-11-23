@@ -1,0 +1,36 @@
+# Screenshots of the boon and path windows for Bill, then the shop leash:
+# the runner put outside the town's radius is pulled back to the ankh.
+load kr-test
+wait_ready
+boons on
+run_start
+wait 2
+screenshot menu-boons
+choose 0
+wait_fight 240
+loot
+worship
+wait 6
+screenshot menu-path
+path
+shop The Hub
+wait 1
+screenshot menu-path-shop
+go shop
+wait 8
+select_runner
+wait 2
+screenshot shop-hud
+leash
+step_out
+wait 1
+leash
+wait 4
+leash
+people
+screenshot leash-pulled-back
+worship
+wait 10
+people
+expect state pathing
+quit

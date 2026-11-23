@@ -294,9 +294,12 @@ namespace
         double ankhUntil;              // the soft timer, in game seconds (g_gameClock): when the ankh calls you on
         DWORD bowSince;                // when a runner started bowing (0: nobody)
         int catsEarned;
+        Ogre::Vector3 shopCentre;      // in a shop: the town's centre and radius, for the leash
+        float shopRadius;
+        int leashPulls;
         std::map<MedicalSystem::HealthPartStatus*, float> fleshCap; // no natural healing: flesh never rises past this
         Run() : state(RUN_NONE), node(-1), current(ENCOUNTERS[0]), fightStart(0), fightsWon(0), strangersRemoved(0), ankh(NULL), ankhUntil(0),
-              bowSince(0), catsEarned(0) {}
+              bowSince(0), catsEarned(0), shopRadius(0), leashPulls(0) {}
     };
     Run g_run;
 
@@ -636,6 +639,37 @@ namespace
         }
     }
 
+    // A short message on the HUD button, for a few seconds.
+    std::string g_hudNote;
+    DWORD g_hudNoteUntil = 0;
+    void hudNote(const std::string& text)
+    {
+        g_hudNote = text;
+        g_hudNoteUntil = GetTickCount() + 5000;
+        logLine("note: " + text);
+    }
+
+    // The leash (Bill, 2026-11-23: "yes to the leash"): in a shop, a runner
+    // past the town's radius is taken back to the ankh.
+    void keepInTown()
+    {
+        if (g_run.current.kind != NODE_SHOP || g_run.state != RUN_BETWEEN || !g_run.ankh ||
+            g_run.shopRadius <= 0.0f || g_parkFrames > 0 || g_frame % 30 != 0)
+            return;
+        for (size_t i = 0; i < g_run.runners.size(); ++i)
+        {
+            Ogre::Vector3 p = g_run.runners[i]->getPosition();
+            float dx = p.x - g_run.shopCentre.x, dz = p.z - g_run.shopCentre.z;
+            if (dx * dx + dz * dz <= g_run.shopRadius * g_run.shopRadius)
+                continue;
+            Ogre::Vector3 a = g_run.ankh->getPosition();
+            ++g_run.leashPulls;
+            hudNote("The ankh won't let you leave");
+            parkRunners(Ogre::Vector3(a.x + 2.0f * METRE, a.y, a.z - 2.0f * METRE));
+            return;
+        }
+    }
+
     void keepParking()
     {
         if (g_parkFrames <= 0)
@@ -678,6 +712,8 @@ namespace
             return;
         }
         Ogre::Vector3 c = t->getPosition();
+        g_run.shopCentre = c;
+        g_run.shopRadius = t->getRadius();
         parkRunners(c);
         ou->player->focusCamera(c);
         g_run.state = RUN_BETWEEN;
@@ -687,7 +723,7 @@ namespace
         AFTER_NODE_SECONDS = normal;
         std::ostringstream o;
         o << "shop: in " << t->getName() << " at " << int(c.x) << "," << int(c.y) << "," << int(c.z) << " ("
-          << factionNameOf(t->getFaction()) << ")";
+          << factionNameOf(t->getFaction()) << "), radius " << int(g_run.shopRadius / METRE) << " m";
         logLine(o.str());
     }
 
@@ -1142,6 +1178,8 @@ namespace
 
     std::string hudCaption()
     {
+        if (!g_hudNote.empty() && GetTickCount() < g_hudNoteUntil)
+            return "Rogue: " + g_hudNote;
         switch (g_run.state)
         {
         case RUN_NONE:
@@ -1526,8 +1564,37 @@ namespace
                 if (g_run.choices.size() >= 3)
                     g_run.choices.pop_back();
                 g_run.choices.push_back(shop);
+                std::vector<std::string> labels;
+                for (size_t i = 0; i < g_run.choices.size(); ++i)
+                    labels.push_back(nodeLabel(g_run.choices[i]));
+                showChoices(g_choiceTitle.c_str(), labels, goPath);
             }
             atCheck(g_run.state == RUN_PATHING && findTown(town) != NULL, "shop on offer: " + town);
+            return true;
+        }
+        if (cmd == "step_out") // step_out: the runner put just outside the shop town's radius (tests the leash)
+        {
+            if (g_run.current.kind != NODE_SHOP || g_run.runners.empty())
+            {
+                atCheck(false, "step_out: not in a shop");
+                return true;
+            }
+            Ogre::Vector3 out(g_run.shopCentre.x + g_run.shopRadius + 30.0f * METRE, g_run.shopCentre.y,
+                              g_run.shopCentre.z);
+            park(g_run.runners[0], out);
+            atWrite("INFO", "step_out: runner put " + toStr(g_run.shopRadius / METRE + 30.0f) +
+                                " m from the town's centre");
+            return true;
+        }
+        if (cmd == "leash") // leash: the town's radius, the runner's distance from its centre, pulls so far
+        {
+            std::ostringstream o;
+            o << "leash: radius " << int(g_run.shopRadius / METRE) << " m";
+            if (!g_run.runners.empty())
+                o << ", runner " << int(g_run.runners[0]->getPosition().distance(g_run.shopCentre) / METRE)
+                  << " m from the centre";
+            o << ", pulled back " << g_run.leashPulls << " times";
+            atWrite("INFO", o.str());
             return true;
         }
         if (cmd == "towns") // towns: every town name and building count, for SHOP_TOWNS
@@ -1968,6 +2035,7 @@ namespace
             return;
         }
         keepParking();
+        keepInTown();
         holdWounds();
         checkFight();
         watchAnkh();

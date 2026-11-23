@@ -1,0 +1,30 @@
+# Balance: every encounter in the pool, replayed with a fresh fixed-stat
+# runner, six bouts each, with the Katana and then the Horse Chopper.
+# Speed 3; times are real seconds. Rows get assigned by these win rates.
+load kr-test
+wait_ready
+speed 3
+run_start
+wait 2
+# Katana
+weapon 476-gamedata.base
+trials 0 6 120
+trials 1 6 120
+trials 2 6 120
+trials 3 6 120
+trials 4 6 120
+trials 5 6 120
+trials 6 6 120
+trials 7 6 120
+# Horse Chopper
+weapon 475-gamedata.base
+trials 0 6 120
+trials 1 6 120
+trials 2 6 120
+trials 3 6 120
+trials 4 6 120
+trials 5 6 120
+trials 6 6 120
+trials 7 6 120
+strangers
+quit
