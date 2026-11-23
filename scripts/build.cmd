@@ -54,6 +54,10 @@ if /i "%~1"=="install" (
         exit /b 1
     )
     echo Installed to "%KENSHI_DIR%\mods\KenshiRogue"
+    REM RE_Kenshi loads the plugin only while the mod is enabled, and a mod
+    REM needs a .mod file to be listed. Enable it in Kenshi's launcher.
+    python -I "%REPO%\scripts\make_mod.py" "%KENSHI_DIR%\mods\KenshiRogue"
+    if errorlevel 1 exit /b 1
 )
 
 endlocal
