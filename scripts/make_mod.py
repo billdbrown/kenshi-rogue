@@ -9,12 +9,24 @@ list (data/mods.cfg), and a mod needs a .mod file to be listed at all
 
 Both are the vanilla "Starving bandit mob" squad with its numbers fixed: a
 Hungry bandit as leader (the vanilla leader is the tougher "Hungry bandit
-leader"), and 0 or 1 more. The plugin refers to them by these stringIds.
+leader"), and 0 or 1 more.
+
+  3..5-KenshiRogue.mod  the ankh's material, part and worship
+  6-KenshiRogue.mod     "Kenshi Rogue: ankh", a building you bow at to leave a
+                        node (Bill, 2026-11-23). A placeholder: Kenshi Town's
+                        Faience Ankh model (its scripts/assets/build_ankh.cmd
+                        builds the files; install copies them from there, so
+                        Bill's model isn't republished in this repo). Its use is
+                        a throne's, with the fogmen's bowing for sitting, as in
+                        Kenshi Town.
+
+The plugin refers to all of these by their stringIds.
 
     python -I scripts/make_mod.py <Kenshi\\mods\\KenshiRogue>
 """
 
 import os
+import shutil
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -23,6 +35,15 @@ import kmod  # noqa: E402
 DEPENDENCIES = ["gamedata.base", "Newwworld.mod", "rebirth.mod", "Dialogue.mod"]
 STARVING_MOB = ("1307-gamedata.base", "Starving bandit mob")
 HUNGRY_BANDIT = ("1304-gamedata.base", "Hungry bandit")
+TORCH_POST = ("5437-new_furniture_otto.mod", "Torch Post")
+SIGNS_MATERIAL = ("973-gamedata.base", "signs")
+THRONE_USE = ("57289-rebirth.mod", "throne chair")  # BuildingFunctionality, BF_THRONE
+BOWING = ("44934-rebirth.mod", "bowing")             # the fogmen's worship animation
+
+KENSHI_TOWN_ANKH = os.environ.get(
+    "KENSHI_TOWN_ANKH", os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir,
+                                     "kenshi-town", "build", "assets", "ankh"))
+ANKH_FILES = ["ankh.mesh", "ankh.xml", "ankh.dds", "ankh_n.dds"]
 
 
 def base(db, sid_and_name):
@@ -52,6 +73,37 @@ def main():
         else:
             rec.refs.pop(b"squad", None)
         f.add(rec)
+
+    def new(base_rec, name):
+        rec = kmod.clone(base_rec, f.new_id("KenshiRogue.mod"), name)
+        rec.id = f.last_id
+        return f.add(rec)
+
+    # The ankh, as Kenshi Town's build_mods.py makes it (see there for why).
+    where = ".\mods\KenshiRogue\\"
+    mat = new(base(db, SIGNS_MATERIAL), "Kenshi Rogue ankh")
+    mat.set("file", "texture map", where + "ankh.dds")
+    mat.set("file", "normal map", where + "ankh_n.dds")
+    mat.set("float", "specular mult", 0.3)
+    torch = base(db, TORCH_POST)
+    part = new(db[torch.refs[b"parts"][0][0]], "Kenshi Rogue ankh part")
+    part.set("file", "phs or mesh", where + "ankh.mesh")
+    part.set("file", "xml collision", where + "ankh.xml")
+    part.refs[b"material"] = [(kmod._b(mat.sid), 0, 100, 0)]
+    use = new(base(db, THRONE_USE), "Kenshi Rogue ankh worship")
+    use.refs[b"animation"] = [(base(db, BOWING).sid, 0, 0, 0)]
+    building = new(torch, "Kenshi Rogue: ankh")
+    building.refs = kmod.OrderedDict([(b"parts", [(kmod._b(part.sid), 0, 100, 0)]),
+                                      (b"functionality", [(kmod._b(use.sid), 0, 0, 0)])])
+    building.set("str", "building category", "EXTERIOR")
+    building.set("str", "Description", "Bow here to leave. Kenshi Rogue.")
+    assert building.sid == kmod._b("6-KenshiRogue.mod"), building.sid
+
+    for name in ANKH_FILES:
+        src = os.path.join(KENSHI_TOWN_ANKH, name)
+        if not os.path.isfile(src):
+            raise SystemExit("%s missing: build Kenshi Town's ankh (scripts\assets\build_ankh.cmd there)" % src)
+        shutil.copy2(src, os.path.join(sys.argv[1], name))
 
     path = os.path.join(sys.argv[1], "KenshiRogue.mod")
     kmod.write(f, path)

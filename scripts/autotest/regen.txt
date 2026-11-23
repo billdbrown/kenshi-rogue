@@ -1,0 +1,23 @@
+# No natural healing during a run. Kenshi heals only treated wounds
+# (untreated ones slowly worsen: first try, 2026-11-23), so the runner is
+# wounded and bandaged, then left: flesh must not rise. Then natural healing
+# on, the same wait, for contrast. The ankh timer is long so it doesn't move
+# the run on mid-test.
+load kr-test
+wait_ready
+ankh_timer 900
+run_start
+wait_fight 240
+wound 30
+bandage
+regen
+runner
+speed 5
+wait 60
+runner
+regen
+regen on
+wait 60
+runner
+regen
+quit

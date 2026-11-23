@@ -30,10 +30,14 @@
 #include <kenshi/CharMovement.h>
 #include <kenshi/SaveManager.h>
 #include <kenshi/Enums.h>
+#include <kenshi/Building/Building.h>
+#include <kenshi/CameraClass.h>
+#include <kenshi/Faction.h>
 #include <kenshi/util/hand.h>
 
 #include <mygui/MyGUI_Gui.h>
 #include <mygui/MyGUI_Button.h>
+#include <mygui/MyGUI_Window.h>
 #include <mygui/MyGUI_Delegate.h>
 #include <ogre/OgreRoot.h>
 #include <ogre/OgreRenderSystem.h>
@@ -65,6 +69,17 @@ namespace
     const char* GRADE_MAKER = "912-gamedata.base";       // "Unknown" maker, the one with Rusted Junk
     const char* GRADE_RUSTED_JUNK = "913-gamedata.base"; // MaterialSpecsWeapon "Rusted Junk"
     const char* FIRST_AID = "209-gamedata.base";         // Basic First Aid Kit
+    const char* ANKH = "6-KenshiRogue.mod";              // "Kenshi Rogue: ankh"
+
+    // After a node: bow at the ankh to move on (Bill, 2026-11-23). A soft
+    // timer, generous, after which the ankh calls you on anyway.
+    DWORD AFTER_NODE_SECONDS = 180;       // the harness's `ankh_timer` shortens it
+    const float ANKH_DISTANCE_M = 4.0f;   // the ankh appears this far from the runner
+    const float BOW_RADIUS_M = 1.5f;      // a runner this close to the ankh's origin is bowing
+    const DWORD BOW_MS = 1500;            // for this long, and the run moves on
+    // Cats after a won fight: a random amount in this range, times the fight's number.
+    const int CATS_MIN = 60, CATS_MAX = 140;
+    const size_t OWNERSHIPS_MONEY = 0x88; // Ownerships::money (as Kenshi Town reads it)
 
     const float METRE = 10.0f;               // world units per metre
     const float ARENA_OFFSET_M = 0.0f;       // the arena is where your first character stands (they stand aside)
@@ -80,7 +95,10 @@ namespace
     };
     const FixedStat RUNNER_STATS[] = {
         {STAT_STRENGTH, 10}, {STAT_MELEE_ATTACK, 10}, {STAT_MELEE_DEFENCE, 10}, {STAT_TOUGHNESS, 10},
-        {STAT_DEXTERITY, 10}, {STAT_ATHLETICS, 10}, {STAT_HACKERS, 10}, {STAT_DODGE, 5},
+        {STAT_DEXTERITY, 10}, {STAT_ATHLETICS, 10}, {STAT_DODGE, 5},
+        // Every melee weapon skill alike, so trials compare weapons, not skills.
+        {STAT_HACKERS, 10}, {STAT_KATANAS, 10}, {STAT_SABRES, 10}, {STAT_BLUNT, 10}, {STAT_HEAVYWEAPONS, 10},
+        {STAT_POLEARMS, 10},
     };
 
     typedef RootObject* (__fastcall* CreateCharFn)(RootObjectFactory* self, Faction* faction,
@@ -91,8 +109,26 @@ namespace
                                              Faction* flagUniform);
     CreateCharFn g_createChar = NULL;
     CreateItemFn g_createItem = NULL;
+    typedef Building* (__fastcall* CreateBuildingFn)(
+        RootObjectFactory* self, GameData* data, Ogre::Vector3 position, TownBase* t, Faction* owner,
+        Ogre::Quaternion rotation, FactoryCallbackInterface* cb, Layout* furnitureOf, Building* isDoorOf,
+        GameSaveState* saveState, Building* isIndoorsOf, bool invisible, bool completed, bool isFoliage,
+        int floorNumber, bool isOutsideFurniture);
+    CreateBuildingFn g_createBuilding = NULL;
+
+    int* factionMoney(Faction* f)
+    {
+        if (!f || !f->factionOwnerships)
+            return NULL;
+        return reinterpret_cast<int*>(reinterpret_cast<char*>(f->factionOwnerships) + OWNERSHIPS_MONEY);
+    }
 
     int g_frame = 0;
+    bool g_atActive = false; // a harness scenario is running (see Autotest, below)
+    // Game time: what the ankh's timer counts, so pausing to loot doesn't eat
+    // it and 5x makes it pass 5x as fast. The harness's `clock` checks.
+    double g_gameClock = 0.0;
+    std::string g_startWeapon = START_WEAPON; // the scenario's `weapon` changes it, for trials
 
     void logLine(const std::string& s)
     {
@@ -189,17 +225,18 @@ namespace
         NodeKind kind;
         const char* squad; // fights
         int firstAidKits;  // fights: kits each enemy carries
+        int enemyCount;    // fights: how many the squad has (must match KenshiRogue.mod)
         const char* label;
     };
     // The first slice. Fight 1 is always the single starving bandit.
     const Node NODES[] = {
-        {NODE_FIGHT, SQUAD_ONE_BANDIT, 1, "Fight 1: a starving bandit"},
-        {NODE_REST, NULL, 0, "Rest"},
-        {NODE_FIGHT, SQUAD_TWO_BANDITS, 0, "Fight 2: two starving bandits"},
+        {NODE_FIGHT, SQUAD_ONE_BANDIT, 1, 1, "Fight 1: a starving bandit"},
+        {NODE_REST, NULL, 0, 0, "Rest"},
+        {NODE_FIGHT, SQUAD_TWO_BANDITS, 0, 2, "Fight 2: two starving bandits"},
     };
     const int NODE_COUNT = sizeof(NODES) / sizeof(NODES[0]);
 
-    enum RunState { RUN_NONE, RUN_FIGHTING, RUN_BETWEEN, RUN_WON, RUN_LOST };
+    enum RunState { RUN_NONE, RUN_FIGHTING, RUN_BETWEEN, RUN_WON, RUN_LOST, RUN_CHOOSING };
 
     struct Run
     {
@@ -210,10 +247,17 @@ namespace
         std::vector<Character*> enemies;    // the current (or last) fight's
         std::vector<Character*> allEnemies; // every fight's, so far: the downed stay as bodies to loot
         DWORD fightStart;
+        Ogre::Vector3 spawnAt;         // where the current fight's squad was made
         int fightsWon;
         int strangersRemoved;
         std::string lastResult;
-        Run() : state(RUN_NONE), node(-1), fightStart(0), fightsWon(0), strangersRemoved(0) {}
+        Building* ankh;                // standing after a node, until bowed at
+        double ankhUntil;              // the soft timer, in game seconds (g_gameClock): when the ankh calls you on
+        DWORD bowSince;                // when a runner started bowing (0: nobody)
+        int catsEarned;
+        std::map<MedicalSystem::HealthPartStatus*, float> fleshCap; // no natural healing: flesh never rises past this
+        Run() : state(RUN_NONE), node(-1), fightStart(0), fightsWon(0), strangersRemoved(0), ankh(NULL), ankhUntil(0),
+              bowSince(0), catsEarned(0) {}
     };
     Run g_run;
 
@@ -249,6 +293,8 @@ namespace
             if (!p || !p->getData())
                 continue;
             o << " " << p->getData()->name << " " << int(p->flesh) << "/" << int(p->maxHealth());
+            if (p->fleshStun > 0.5f) // Kenshi's panel shows flesh minus stun damage
+                o << " (stun " << int(p->fleshStun) << ")";
         }
         const char* limbNames[] = {"left arm", "right arm", "left leg", "right leg"};
         const RobotLimbs::Limb limbs[] = {RobotLimbs::LEFT_ARM, RobotLimbs::RIGHT_ARM, RobotLimbs::LEFT_LEG,
@@ -308,7 +354,7 @@ namespace
         std::ostringstream note;
         note << "runner: template's " << stripItems(c) << " items removed";
         logLine(note.str());
-        Item* w = makeItem(data(START_WEAPON), data(GRADE_MAKER), data(GRADE_RUSTED_JUNK));
+        Item* w = makeItem(data(g_startWeapon.c_str()), data(GRADE_MAKER), data(GRADE_RUSTED_JUNK));
         if (!w)
             logLine("runner's weapon: not made");
         else if (!c->giveItem(w, false, true))
@@ -319,6 +365,32 @@ namespace
             logLine("runner's weapon: " + w->getName() + (equipped ? ", equipped" : ", NOT equipped"));
         }
         return c;
+    }
+
+    // The squad's people: that faction, near where it was made, up, and not
+    // from an earlier fight. Called again for the first seconds of a fight:
+    // the squad isn't always all there at once (trials: 3 of 37 spawns found
+    // fewer, two found none and counted as instant wins). New ones get their
+    // kits and the order to attack.
+    void collectEnemies(const Node& n)
+    {
+        Faction* them = ou->factionMgr->getFactionByStringID(ENEMY_FACTION);
+        lektor<RootObject*> found;
+        ou->getCharactersWithinSphere(found, g_run.spawnAt, 30.0f * METRE, 30.0f * METRE, 0.0f, 40, 40, NULL);
+        GameData* kit = data(FIRST_AID);
+        for (uint32_t i = 0; i < found.size(); ++i)
+        {
+            Character* c = static_cast<Character*>(found[i]);
+            if (!c || c->getFaction() != them || out(c) || contains(g_run.allEnemies, c))
+                continue;
+            g_run.enemies.push_back(c);
+            g_run.allEnemies.push_back(c);
+            for (int k = 0; k < n.firstAidKits; ++k)
+                if (Item* it = makeItem(kit, NULL, NULL))
+                    c->giveItem(it, false, true);
+            if (!g_run.runners.empty())
+                c->attackTarget(g_run.runners[0]);
+        }
     }
 
     void startFight(const Node& n)
@@ -340,29 +412,8 @@ namespace
         Platoon* made = ou->theFactory->createRandomSquad(them, at, NULL, 20, NULL, squad, NULL, NULL, NULL, false,
                                                           g_run.runners[0]->getHandle(), NULL, 1.0f, SQ_ROAMING,
                                                           false);
-        // The squad's people: that faction, right where it was made, up, and
-        // not from an earlier fight (fight 2 counted fight 1's downed bandit,
-        // second run).
-        lektor<RootObject*> found;
-        ou->getCharactersWithinSphere(found, at, 30.0f * METRE, 30.0f * METRE, 0.0f, 40, 40, NULL);
-        for (uint32_t i = 0; i < found.size(); ++i)
-        {
-            Character* c = static_cast<Character*>(found[i]);
-            if (c && c->getFaction() == them && !out(c) && !contains(g_run.allEnemies, c))
-            {
-                g_run.enemies.push_back(c);
-                g_run.allEnemies.push_back(c);
-            }
-        }
-        GameData* kit = data(FIRST_AID);
-        for (size_t i = 0; i < g_run.enemies.size(); ++i)
-            for (int k = 0; k < n.firstAidKits; ++k)
-                if (Item* it = makeItem(kit, NULL, NULL))
-                    g_run.enemies[i]->giveItem(it, false, true);
-        // An explicit order as well as the squad's target: with only the
-        // target, fight 2's bandits never came in 300 s (second run).
-        for (size_t i = 0; i < g_run.enemies.size(); ++i)
-            g_run.enemies[i]->attackTarget(g_run.runners[0]);
+        g_run.spawnAt = at;
+        collectEnemies(n);
         std::ostringstream o;
         o << n.label << ": squad " << (made ? "made" : "NOT made") << ", " << g_run.enemies.size() << " enemies";
         logLine(o.str());
@@ -392,10 +443,101 @@ namespace
                 // panel in the second).
                 p->fleshStun = 0.0f;
                 p->updateDerivedHealths();
+                g_run.fleshCap[p] = p->flesh;
             }
             m->blood = m->getMaxBlood();
             m->validateHealthValues();
             logLine("rest: " + c->getName() + " now " + health(c));
+        }
+    }
+
+    // ---- The ankh: bow at it to leave a node --------------------------------
+
+    void removeAnkh()
+    {
+        if (g_run.ankh)
+            ou->dynamicDestroyBuilding(hand(g_run.ankh));
+        g_run.ankh = NULL;
+        g_run.bowSince = 0;
+    }
+
+    void spawnAnkh()
+    {
+        removeAnkh();
+        GameData* d = data(ANKH);
+        g_run.ankhUntil = g_gameClock + AFTER_NODE_SECONDS;
+        if (!d || !g_createBuilding || g_run.runners.empty())
+        {
+            logLine("ankh: not made (no data or no runner); the timer still runs");
+            return;
+        }
+        Ogre::Vector3 at = g_run.runners[0]->getPosition();
+        Ogre::Vector3 pos(at.x, 0.0f, at.z + ANKH_DISTANCE_M * METRE); // y 0: createBuilding adds the ground's height
+        g_run.ankh = g_createBuilding(ou->theFactory, d, pos, NULL, ou->player->getFaction(),
+                                      Ogre::Quaternion::IDENTITY, NULL, NULL, NULL, NULL, NULL, false, true, false, 0,
+                                      false);
+        g_run.bowSince = 0;
+        if (g_run.ankh)
+        {
+            Ogre::Vector3 p = g_run.ankh->getPosition();
+            std::ostringstream o;
+            o << "ankh: up at " << int(p.x) << "," << int(p.y) << "," << int(p.z) << "; " << AFTER_NODE_SECONDS
+              << " s to bow";
+            logLine(o.str());
+        }
+        else
+            logLine("ankh: createBuilding returned nothing");
+    }
+
+    void payCats()
+    {
+        int fight = 0;
+        for (int i = 0; i <= g_run.node && i < NODE_COUNT; ++i)
+            if (NODES[i].kind == NODE_FIGHT)
+                ++fight;
+        int cats = (CATS_MIN + rand() % (CATS_MAX - CATS_MIN + 1)) * (fight > 0 ? fight : 1);
+        int* money = factionMoney(ou->player->getFaction());
+        if (money)
+            *money += cats;
+        g_run.catsEarned += cats;
+        std::ostringstream o;
+        o << "paid " << cats << " cats" << (money ? "" : " (NO money record found)") << "; " << g_run.catsEarned
+          << " this run";
+        logLine(o.str());
+    }
+
+    void advance();
+
+    // Bowing: a runner at the ankh's origin (where its use kneels you) for
+    // BOW_MS. Or the timer runs out and the ankh calls you on.
+    void watchAnkh()
+    {
+        if (g_run.state != RUN_BETWEEN || !g_run.ankhUntil)
+            return;
+        if (g_gameClock > g_run.ankhUntil)
+        {
+            logLine("ankh: time's up; the ankh calls you on");
+            advance();
+            return;
+        }
+        if (!g_run.ankh)
+            return;
+        Ogre::Vector3 a = g_run.ankh->getPosition();
+        bool bowing = false;
+        for (size_t i = 0; i < g_run.runners.size() && !bowing; ++i)
+        {
+            Ogre::Vector3 p = g_run.runners[i]->getPosition();
+            float dx = p.x - a.x, dz = p.z - a.z;
+            bowing = !out(g_run.runners[i]) && dx * dx + dz * dz < BOW_RADIUS_M * METRE * BOW_RADIUS_M * METRE;
+        }
+        if (!bowing)
+            g_run.bowSince = 0;
+        else if (!g_run.bowSince)
+            g_run.bowSince = GetTickCount();
+        else if (GetTickCount() - g_run.bowSince > BOW_MS)
+        {
+            logLine("ankh: bowed; moving on");
+            advance();
         }
     }
 
@@ -409,6 +551,8 @@ namespace
         if (g_run.state == RUN_NONE || g_run.state == RUN_WON || g_run.state == RUN_LOST)
             return; // starting is runStart's job
         int next = g_run.node + 1;
+        removeAnkh();
+        g_run.ankhUntil = 0;
         if (next >= NODE_COUNT)
         {
             g_run.state = RUN_WON;
@@ -436,9 +580,164 @@ namespace
             rest();
             g_run.lastResult = "rested";
             g_run.state = RUN_BETWEEN;
+            spawnAnkh();
             return;
         }
         startFight(n);
+    }
+
+    // ---- Boons: a run opens with a choice of three (Bill, 2026-11-23) ------
+
+    enum BoonKind { BOON_STAT, BOON_WEAPON, BOON_KITS, BOON_CATS };
+    struct Boon
+    {
+        BoonKind kind;
+        StatsEnumerated stat;
+        float amount;
+        std::string weapon; // stringId, BOON_WEAPON
+        std::string label;
+    };
+    std::vector<Boon> g_offer;
+    MyGUI::Window* g_boonWindow = NULL;
+    bool g_atBoons = false; // scenarios skip the choice unless they ask for it (`boons on`)
+
+    const char* MIDGRADE_MAKER = "917-gamedata.base"; // "Ancient": its grades are Mid-Grade Salvage, (Old) Refitted
+    const char* GRADE_MIDGRADE = "918-gamedata.base"; // Mid-Grade Salvage
+
+    Boon statBoon(StatsEnumerated st, float amount)
+    {
+        Boon b;
+        b.kind = BOON_STAT;
+        b.stat = st;
+        b.amount = amount;
+        std::ostringstream o;
+        o << "+" << int(amount) << " " << CharStats::getStatName(st);
+        b.label = o.str();
+        return b;
+    }
+
+    std::vector<Boon> boonPool()
+    {
+        std::vector<Boon> pool;
+        pool.push_back(statBoon(STAT_MELEE_ATTACK, 10));
+        pool.push_back(statBoon(STAT_MELEE_DEFENCE, 10));
+        pool.push_back(statBoon(STAT_STRENGTH, 10));
+        pool.push_back(statBoon(STAT_TOUGHNESS, 10));
+        const StatsEnumerated skills[] = {STAT_SABRES, STAT_KATANAS, STAT_HACKERS, STAT_BLUNT, STAT_HEAVYWEAPONS};
+        pool.push_back(statBoon(skills[rand() % 5], 10));
+        // A better weapon: a random type at Mid-Grade Salvage.
+        const char* types[] = {"474-gamedata.base", "476-gamedata.base", "478-gamedata.base", "901-gamedata.base",
+                               "903-gamedata.base", "1020-gamedata.base", "475-gamedata.base"};
+        GameData* w = data(types[rand() % 7]);
+        if (w)
+        {
+            Boon b;
+            b.kind = BOON_WEAPON;
+            b.weapon = w->stringID;
+            b.amount = 0;
+            b.stat = STAT_NONE;
+            b.label = "A Mid-Grade Salvage " + w->name;
+            pool.push_back(b);
+        }
+        Boon kits;
+        kits.kind = BOON_KITS;
+        kits.amount = 3;
+        kits.stat = STAT_NONE;
+        kits.label = "3 Basic First Aid Kits";
+        pool.push_back(kits);
+        Boon cats;
+        cats.kind = BOON_CATS;
+        cats.amount = 300;
+        cats.stat = STAT_NONE;
+        cats.label = "A purse of 300 cats";
+        pool.push_back(cats);
+        return pool;
+    }
+
+    std::string applyBoon(const Boon& b)
+    {
+        Character* r = g_run.runners.empty() ? NULL : g_run.runners[0];
+        if (!r)
+            return "no runner";
+        if (b.kind == BOON_STAT)
+        {
+            if (CharStats* st = r->getStats())
+                st->getStatRef(b.stat) += b.amount;
+            return b.label;
+        }
+        if (b.kind == BOON_WEAPON)
+        {
+            Item* w = makeItem(data(b.weapon.c_str()), data(MIDGRADE_MAKER), data(GRADE_MIDGRADE));
+            if (!w || !r->giveItem(w, false, true))
+                return b.label + ": NOT made";
+            bool equipped = r->getInventory() && r->getInventory()->equipItem(w);
+            return b.label + " (" + w->getName() + (equipped ? ", equipped)" : ", in the pack)");
+        }
+        if (b.kind == BOON_KITS)
+        {
+            int n = 0;
+            for (int i = 0; i < int(b.amount); ++i)
+                if (Item* it = makeItem(data(FIRST_AID), NULL, NULL))
+                    n += r->giveItem(it, false, true) ? 1 : 0;
+            return b.label + " (" + toStr(float(n)) + " given)";
+        }
+        int* money = factionMoney(ou->player->getFaction());
+        if (money)
+            *money += int(b.amount);
+        g_run.catsEarned += int(b.amount);
+        return b.label;
+    }
+
+    void advance();
+    void choose(size_t i);
+    void onBoon0(MyGUI::WidgetPtr) { choose(0); }
+    void onBoon1(MyGUI::WidgetPtr) { choose(1); }
+    void onBoon2(MyGUI::WidgetPtr) { choose(2); }
+
+    void offerBoons()
+    {
+        std::vector<Boon> pool = boonPool();
+        g_offer.clear();
+        while (g_offer.size() < 3 && !pool.empty())
+        {
+            size_t k = size_t(rand()) % pool.size();
+            g_offer.push_back(pool[k]);
+            pool.erase(pool.begin() + k);
+        }
+        g_run.state = RUN_CHOOSING;
+        std::ostringstream o;
+        o << "boons offered:";
+        for (size_t i = 0; i < g_offer.size(); ++i)
+            o << " [" << i << "] " << g_offer[i].label << ";";
+        logLine(o.str());
+        MyGUI::Gui* gui = MyGUI::Gui::getInstancePtr();
+        if (!gui)
+            return;
+        if (g_boonWindow)
+            gui->destroyWidget(g_boonWindow);
+        g_boonWindow = gui->createWidgetReal<MyGUI::Window>("Kenshi_WindowCX", 0.36f, 0.30f, 0.28f, 0.30f,
+                                                            MyGUI::Align::Default, "Window", "KenshiRogueBoons");
+        g_boonWindow->setCaption("Choose a boon");
+        void (*clicks[])(MyGUI::WidgetPtr) = {onBoon0, onBoon1, onBoon2};
+        for (size_t i = 0; i < g_offer.size(); ++i)
+        {
+            MyGUI::Button* b = g_boonWindow->getClientWidget()->createWidgetReal<MyGUI::Button>(
+                "Kenshi_Button1", 0.05f, 0.06f + 0.31f * float(i), 0.90f, 0.25f, MyGUI::Align::Default);
+            b->setCaption(g_offer[i].label);
+            b->eventMouseButtonClick += MyGUI::newDelegate(clicks[i]);
+        }
+    }
+
+    void choose(size_t i)
+    {
+        if (g_run.state != RUN_CHOOSING || i >= g_offer.size())
+            return;
+        logLine("boon chosen: " + applyBoon(g_offer[i]));
+        if (g_boonWindow && MyGUI::Gui::getInstancePtr())
+            MyGUI::Gui::getInstancePtr()->destroyWidget(g_boonWindow);
+        g_boonWindow = NULL;
+        g_run.state = RUN_BETWEEN; // node -1: advance() plays node 0
+        advance();
     }
 
     bool runStart(float offsetX_m, float offsetZ_m)
@@ -478,10 +777,50 @@ namespace
         std::ostringstream o;
         o << "run started: arena at " << int(g_run.arena.x) << "," << int(g_run.arena.z) << "; " << health(r);
         logLine(o.str());
-        g_run.state = RUN_BETWEEN; // node -1: advance() plays node 0
         ou->player->focusCamera(g_run.arena);
+        if (!g_atActive || g_atBoons)
+        {
+            offerBoons(); // fight 1 starts when one is chosen
+            return true;
+        }
+        g_run.state = RUN_BETWEEN; // node -1: advance() plays node 0
         advance();
         return true;
+    }
+
+    // No natural healing during a run (Bill, 2026-11-23: waiting around after
+    // a fight shouldn't heal you). Each runner body part's flesh may only go
+    // down; a rise from Kenshi's healing is clipped back. Only rest raises the
+    // cap. Bleeding, stun and knockouts are Kenshi's own, untouched (a hook on
+    // HealthPartStatus::update's heal multipliers would also reach those).
+    bool g_noRegen = true;
+    float g_regenClipped = 0.0f; // flesh taken back, for the harness
+
+    void holdWounds()
+    {
+        if (!g_noRegen || g_run.state == RUN_NONE)
+            return;
+        for (size_t i = 0; i < g_run.runners.size(); ++i)
+        {
+            Character* c = g_run.runners[i];
+            MedicalSystem* m = c && !c->isDead() ? c->getMedical() : NULL;
+            for (int k = 0; m && k < m->getPartCount(); ++k)
+            {
+                MedicalSystem::HealthPartStatus* p = m->getPart((unsigned __int64)k);
+                if (!p)
+                    continue;
+                std::map<MedicalSystem::HealthPartStatus*, float>::iterator cap = g_run.fleshCap.find(p);
+                if (cap == g_run.fleshCap.end())
+                    g_run.fleshCap[p] = p->flesh;
+                else if (p->flesh < cap->second)
+                    cap->second = p->flesh;
+                else if (p->flesh > cap->second)
+                {
+                    g_regenClipped += p->flesh - cap->second;
+                    p->flesh = cap->second;
+                }
+            }
+        }
     }
 
     void checkFight()
@@ -497,6 +836,23 @@ namespace
             for (size_t i = 0; i < g_run.enemies.size(); ++i)
                 if (!out(g_run.enemies[i]))
                     g_run.enemies[i]->attackTarget(g_run.runners[0]);
+        }
+        const Node& n = NODES[g_run.node];
+        DWORD since = GetTickCount() - g_run.fightStart;
+        if (int(g_run.enemies.size()) < n.enemyCount)
+        {
+            if (since < 5000)
+            {
+                collectEnemies(n);
+                return;
+            }
+            if (g_run.enemies.empty())
+            {
+                g_run.lastResult = std::string(n.label) + ": NO ENEMIES APPEARED";
+                logLine(g_run.lastResult);
+                g_run.state = RUN_BETWEEN; // not a win: fightsWon unchanged
+                return;
+            }
         }
         bool enemiesOut = true, runnersOut = true;
         for (size_t i = 0; i < g_run.enemies.size(); ++i)
@@ -516,6 +872,8 @@ namespace
         {
             ++g_run.fightsWon;
             g_run.state = RUN_BETWEEN;
+            payCats();
+            spawnAnkh();
         }
     }
 
@@ -533,12 +891,21 @@ namespace
         case RUN_FIGHTING:
             return std::string("Rogue: ") + NODES[g_run.node].label;
         case RUN_BETWEEN:
+            if (g_run.ankhUntil)
+            {
+                DWORD left = g_run.ankhUntil > g_gameClock ? DWORD(g_run.ankhUntil - g_gameClock) : 0;
+                std::ostringstream o;
+                o << "Rogue: bow at the ankh (" << left / 60 << ":" << (left % 60 < 10 ? "0" : "") << left % 60 << ")";
+                return o.str();
+            }
             return g_run.node + 1 < NODE_COUNT ? std::string("Rogue: next, ") + NODES[g_run.node + 1].label
                                                : "Rogue: finish run";
         case RUN_WON:
             return "Rogue: run complete";
         case RUN_LOST:
             return "Rogue: run lost";
+        case RUN_CHOOSING:
+            return "Rogue: choose a boon";
         }
         return "Rogue";
     }
@@ -581,7 +948,6 @@ namespace
     const std::string AT_OUT = "mods\\KenshiRogue\\autotest\\out\\";
 
     bool g_atChecked = false;
-    bool g_atActive = false;
     std::vector<std::string> g_atLines;
     size_t g_atPc = 0;
     DWORD g_atStepStart = 0;
@@ -660,7 +1026,7 @@ namespace
 
     const char* stateName(RunState s)
     {
-        const char* n[] = {"none", "fighting", "between", "won", "lost"};
+        const char* n[] = {"none", "fighting", "between", "won", "lost", "choosing"};
         return n[s];
     }
 
@@ -880,6 +1246,217 @@ namespace
             }
             return true;
         }
+        if (cmd == "weapon") // weapon <stringId>: the starting weapon for runners made from now on
+        {
+            GameData* d = data(rest.c_str());
+            atCheck(d != NULL, "starting weapon " + rest + (d ? " (" + d->name + ")" : " not found"));
+            if (d)
+                g_startWeapon = rest;
+            return true;
+        }
+        if (cmd == "trials") // trials <node> <times> [secs]: that fight again and again, a fresh runner each bout
+        {
+            static int node = 0, left = 0, won = 0, lost = 0, undecided = 0, secs = 180, wonBefore = 0;
+            static bool running = false, inBout = false;
+            static std::string times;
+            if (!running)
+            {
+                int n = 5;
+                node = 0;
+                secs = 180;
+                std::istringstream(rest) >> node >> n >> secs;
+                if (node < 0 || node >= NODE_COUNT || NODES[node].kind != NODE_FIGHT || g_run.runners.empty())
+                {
+                    atCheck(false, "trials: node " + rest + " is not a fight, or no run is going");
+                    return true;
+                }
+                left = n;
+                won = lost = undecided = 0;
+                times.clear();
+                running = true;
+                inBout = false;
+            }
+            if (inBout)
+            {
+                DWORD took = (GetTickCount() - g_run.fightStart) / 1000;
+                if (g_run.state == RUN_FIGHTING)
+                {
+                    if (took < DWORD(secs))
+                        return false;
+                    ++undecided;
+                    times += " " + toStr(float(took)) + "?";
+                }
+                else if (g_run.state == RUN_LOST)
+                {
+                    ++lost;
+                    times += " " + toStr(float(took)) + "L";
+                }
+                else if (g_run.fightsWon > wonBefore)
+                {
+                    ++won;
+                    times += " " + toStr(float(took)) + "W";
+                }
+                else
+                {
+                    ++undecided; // no enemies appeared
+                    times += " " + toStr(float(took)) + "?";
+                }
+                inBout = false;
+            }
+            if (left <= 0)
+            {
+                running = false;
+                std::ostringstream o;
+                o << "trials of " << NODES[node].label << " with " << g_startWeapon << ": " << won << " won, " << lost
+                  << " lost, " << undecided << " undecided (secs and result:" << times << ")";
+                atWrite("INFO", o.str());
+                return true;
+            }
+            // A fresh bout: the last one's people gone, a new runner at the arena.
+            --left;
+            for (size_t i = 0; i < g_run.enemies.size(); ++i)
+                if (g_run.enemies[i])
+                    ou->destroy(g_run.enemies[i], false, "Kenshi Rogue: trials");
+            g_run.enemies.clear();
+            for (size_t i = 0; i < g_run.runners.size(); ++i)
+                if (g_run.runners[i])
+                    ou->destroy(g_run.runners[i], false, "Kenshi Rogue: trials");
+            g_run.runners.clear();
+            g_run.fleshCap.clear(); // a new runner may land at an old one's addresses
+            removeAnkh();
+            g_run.ankhUntil = 0;
+            Character* r = createRunner(g_run.arena);
+            if (!r)
+            {
+                running = false;
+                atCheck(false, "trials: could not make a runner");
+                return true;
+            }
+            g_run.runners.push_back(r);
+            g_run.node = node;
+            wonBefore = g_run.fightsWon;
+            startFight(NODES[node]);
+            inBout = true;
+            return false;
+        }
+        if (cmd == "regen") // regen on|off: natural healing for runners (off is the mode's rule); reports flesh clipped so far
+        {
+            if (rest == "on" || rest == "off")
+                g_noRegen = rest == "off";
+            atWrite("INFO", std::string("natural healing ") + (g_noRegen ? "OFF" : "on") + "; flesh clipped so far " +
+                                toStr(g_regenClipped));
+            return true;
+        }
+        if (cmd == "ankh") // ankh: is one up, where, how far the runner is, time left; cats so far
+        {
+            std::ostringstream o;
+            if (g_run.ankh)
+            {
+                Ogre::Vector3 a = g_run.ankh->getPosition();
+                o << "ankh up at " << int(a.x) << "," << int(a.y) << "," << int(a.z);
+                if (!g_run.runners.empty())
+                    o << ", runner " << g_run.runners[0]->getPosition().distance(a) / METRE << " m away";
+            }
+            else
+                o << "no ankh";
+            if (g_run.ankhUntil)
+                o << "; " << (g_run.ankhUntil > g_gameClock ? int(g_run.ankhUntil - g_gameClock) : 0)
+                  << " game s left";
+            int* money = factionMoney(ou->player->getFaction());
+            o << "; cats earned this run " << g_run.catsEarned << ", faction has " << (money ? *money : -1);
+            atWrite("INFO", o.str());
+            return true;
+        }
+        if (cmd == "worship") // worship: the runner told to use the ankh, as a right-click Use would (job 87, as in Kenshi Town's test)
+        {
+            if (!g_run.ankh || g_run.runners.empty())
+            {
+                atCheck(false, "worship: no ankh or no runner");
+                return true;
+            }
+            g_run.runners[0]->addJob(TaskType(87), g_run.ankh, false, true, g_run.ankh->getPosition());
+            atWrite("INFO", "worship: runner given the ankh's use");
+            return true;
+        }
+        if (cmd == "ankh_timer") // ankh_timer <secs>: the soft timer after a node, from the next ankh on
+        {
+            int secs = 180;
+            std::istringstream(rest) >> secs;
+            AFTER_NODE_SECONDS = DWORD(secs);
+            atWrite("INFO", "ankh timer " + toStr(float(secs)) + " s");
+            return true;
+        }
+        if (cmd == "bandage") // bandage: every wounded part of the runner treated, as first aid would
+        {
+            Character* r = g_run.runners.empty() ? NULL : g_run.runners[0];
+            MedicalSystem* m = r ? r->getMedical() : NULL;
+            for (int k = 0; m && k < m->getPartCount(); ++k)
+                if (MedicalSystem::HealthPartStatus* p = m->getPart((unsigned __int64)k))
+                    p->bandaging = p->maxHealth();
+            atWrite("INFO", "bandaged: " + health(r));
+            return true;
+        }
+        if (cmd == "look_ankh") // look_ankh: Kenshi's own framing of the ankh (focusCameraOnObject)
+        {
+            CameraClass* cam = ou->player->getCamera();
+            if (g_run.ankh && cam)
+                cam->focusCameraOnObject(g_run.ankh, Ogre::Vector3::ZERO, false);
+            atWrite("INFO", g_run.ankh ? "camera on the ankh" : "look_ankh: no ankh");
+            return true;
+        }
+        if (cmd == "pause") // pause on|off: Kenshi's own user pause
+        {
+            ou->userPause(rest != "off");
+            return true;
+        }
+        if (cmd == "clock") // clock: game seconds counted so far, against real time
+        {
+            static double lastGame = 0.0;
+            static DWORD lastReal = 0;
+            std::ostringstream o;
+            o << "game clock " << g_gameClock << " s (speed x" << ou->getFrameSpeedMultiplier()
+              << (ou->isPaused() ? ", PAUSED" : "") << ")";
+            if (lastReal)
+                o << "; since last `clock`: " << g_gameClock - lastGame << " game s in "
+                  << (GetTickCount() - lastReal) / 1000.0 << " real s";
+            lastGame = g_gameClock;
+            lastReal = GetTickCount();
+            atWrite("INFO", o.str());
+            return true;
+        }
+        if (cmd == "boons") // boons on|off: whether run_start offers the choice (off by default in scenarios); with no argument, what's on offer
+        {
+            if (rest == "on" || rest == "off")
+                g_atBoons = rest == "on";
+            std::ostringstream o;
+            o << "boons " << (g_atBoons ? "on" : "off") << "; offered:";
+            for (size_t i = 0; i < g_offer.size(); ++i)
+                o << " [" << i << "] " << g_offer[i].label << ";";
+            atWrite("INFO", o.str());
+            return true;
+        }
+        if (cmd == "choose") // choose <i>: what clicking that boon does
+        {
+            size_t i = 0;
+            std::istringstream(rest) >> i;
+            atCheck(g_run.state == RUN_CHOOSING && i < g_offer.size(), "choose " + rest);
+            choose(i);
+            return true;
+        }
+        if (cmd == "stats") // stats: the runner's combat stats as stored
+        {
+            Character* r = g_run.runners.empty() ? NULL : g_run.runners[0];
+            CharStats* st = r ? r->getStats() : NULL;
+            std::ostringstream o;
+            o << "runner's stats:";
+            const StatsEnumerated show[] = {STAT_STRENGTH, STAT_MELEE_ATTACK, STAT_MELEE_DEFENCE, STAT_TOUGHNESS,
+                                            STAT_DEXTERITY, STAT_SABRES, STAT_KATANAS, STAT_HACKERS, STAT_BLUNT,
+                                            STAT_HEAVYWEAPONS};
+            for (int k = 0; st && k < 10; ++k)
+                o << " " << CharStats::getStatName(show[k]) << " " << st->getStatRef(show[k]) << ";";
+            atWrite("INFO", o.str());
+            return true;
+        }
         if (cmd == "people") // people: your characters, where they are, how far from the arena
         {
             const lektor<Character*>& ps = ou->player->getAllPlayerCharacters();
@@ -1045,13 +1622,20 @@ namespace
     {
         mainLoop_orig(world, time);
         ++g_frame;
+        // The loop's step is real time (paused, 1x and 5x all counted 5 s in 5
+        // real seconds, 2026-11-23), so scale it by Kenshi's speed, and stop
+        // while paused.
+        if (time > 0.0f && time < 10.0f && !world->isPaused())
+            g_gameClock += double(time) * world->getFrameSpeedMultiplier();
         if (!inGame())
         {
             if (g_hud)
                 g_hud->setVisible(false);
             return;
         }
+        holdWounds();
         checkFight();
+        watchAnkh();
         keepArenaQuiet();
         updateHud();
         autotestTick();
@@ -1070,6 +1654,7 @@ __declspec(dllexport) void startPlugin()
         return;
     }
     g_createChar = (CreateCharFn)KenshiLib::GetRealAddress(&RootObjectFactory::createRandomCharacter);
+    g_createBuilding = (CreateBuildingFn)KenshiLib::GetRealAddress(&RootObjectFactory::createBuilding);
     g_handCtor = (HandCtorFn)KenshiLib::GetRealAddress(
         static_cast<hand* (hand::*)(unsigned int, unsigned int, itemType, unsigned int, unsigned int)>(
             &hand::_CONSTRUCTOR));

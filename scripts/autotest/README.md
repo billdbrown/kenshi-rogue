@@ -25,7 +25,7 @@ Nothing is saved during a run, and autosaves are held off.
 | `speed <x>` | game speed |
 | `screenshot <name>` | `<name>.png` of the game window |
 | `note <text>` | a line in the report |
-| `run_start [east m] [south m]` | starts a run: the runner is created that far from your first character (default 300 m north), and fight 1 begins |
+| `run_start [east m] [south m]` | starts a run: your characters are teleported 200 m west, the runner is created where the first of them stood (or that far from it), and fight 1 begins |
 | `wait_fight [secs]` | until the current fight is won or lost (default 300 s); fails if still undecided |
 | `next` | what the HUD button does between nodes: rest, or the next fight |
 | `loot` | everything the run's enemies carry goes to the runner's pack (looting by hand, done for the test) |
@@ -33,7 +33,12 @@ Nothing is saved during a run, and autosaves are held off.
 | `enemies` | each enemy: state, body parts, what they carry |
 | `wound <amount>` | takes that much off every body part of the runner (to test rest) |
 | `focus` | camera on the runner |
-| `strangers` | how many outsiders the arena removed during fights |
+| `select_runner` | the runner selected, so Kenshi's own panel (health, stats) is in screenshots |
+| `medraw` | every body part's medical fields, raw, to compare with the panel |
+| `people` | your characters: where they are, how far from the arena |
+| `weapon <stringId>` | the starting weapon for runners made from now on (default `475-gamedata.base`, Horse Chopper) |
+| `trials <node> <times> [secs]` | that fight again and again, each with a fresh runner; reports won / lost / undecided and each bout's real seconds. Needs a run going. |
+| `strangers` | how many outsiders the arena removed while the run was on |
 | `expect state <none\|fighting\|between\|won\|lost>` | the run's state |
 | `expect fights_won <n>` / `expect enemies <n>` / `expect runner_up` | counts and state |
 | `expect carrying <item name>` | the runner's pack has it |
@@ -43,3 +48,8 @@ Nothing is saved during a run, and autosaves are held off.
 
 `report.txt`, one line each: `STEP`, `INFO`, `PASS`, `FAIL`, `SHOT`, `NOTE`, ending
 `DONE pass=N fail=M`. The runner exits 0 only with a DONE and no FAIL.
+
+## Test save
+
+**`kr-test`** (Bill, 2026-11-23): a Wanderer new game, without Kenshi Town's mods, saved with its
+one character (Claude, a skeleton) on flat open ground. The arena is that spot.

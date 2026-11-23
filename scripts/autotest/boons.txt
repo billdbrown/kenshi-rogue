@@ -1,0 +1,33 @@
+# Boons: a run opens with a choice of three. The window is screenshotted,
+# then the first offer is chosen and its effect checked (stats, pack, cats).
+# Also: the game clock the ankh's timer counts, paused, 1x and 5x.
+load kr-test
+wait_ready
+clock
+pause on
+wait 5
+clock
+pause off
+speed 1
+wait 5
+clock
+speed 5
+wait 5
+clock
+speed 1
+boons on
+run_start
+wait 1
+expect state choosing
+boons
+stats
+runner
+ankh
+screenshot boon-window
+choose 0
+wait 2
+expect state fighting
+stats
+runner
+ankh
+quit

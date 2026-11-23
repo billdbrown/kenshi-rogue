@@ -1,0 +1,36 @@
+# The ankh. Part 1: after fight 1 it appears, cats are paid, and bowing at it
+# moves the run on (to the rest, which raises another). Part 2: nobody bows,
+# and the soft timer moves the run on by itself (to fight 2). The timer counts
+# game time, so the clock is checked paused, at 1x and at 5x first.
+load kr-test
+wait_ready
+clock
+speed 0
+wait 5
+clock
+speed 1
+wait 5
+clock
+speed 5
+wait 5
+clock
+speed 1
+run_start
+wait_fight 240
+ankh
+expect state between
+look_ankh
+wait 2
+screenshot ankh-up
+ankh_timer 20
+worship
+wait 1
+screenshot bowing
+wait 6
+ankh
+expect state between
+note part 2: nobody bows; the rest's ankh has 20 game s
+wait 30
+ankh
+expect state fighting
+quit
