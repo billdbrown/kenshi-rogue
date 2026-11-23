@@ -129,6 +129,10 @@ def main():
         else:
             rec.refs.pop(b"squad", None)
         rec.refs[b"AI packages"] = [(ROAMING_AI, 0, 0, 0)]
+        # No talking first: dust bandits open with a "hand over your stuff"
+        # conversation that waits on the player; a fight stalled 600 s on it.
+        rec.refs.pop(b"dialog leader", None)
+        rec.refs.pop(b"dialog squad", None)
         assert rec.sid == kmod._b("%d-KenshiRogue.mod" % number), rec.sid
 
     for name in ANKH_FILES:

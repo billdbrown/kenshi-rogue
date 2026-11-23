@@ -1,0 +1,25 @@
+# Two fixes, checked: a shop straight after an autofight fight (the teleport
+# used to be ignored), and dust bandits without their opening conversation
+# (a fight stalled 600 s).
+load kr-test
+wait_ready
+speed 2
+autofight on
+run_start
+wait_fight 240
+loot
+worship
+wait 6
+path
+shop The Hub
+go shop
+wait 8
+people
+leash
+worship
+wait 8
+people
+expect state pathing
+runner_stats 20
+trials 3 4 120
+quit

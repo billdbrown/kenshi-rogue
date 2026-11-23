@@ -171,6 +171,10 @@ namespace
         CharMovement* mv = c ? c->movement : NULL;
         if (!mv)
             return false;
+        // Out of combat and goal-free first: a runner fresh from a fight
+        // (autofight's attack order) ignored every teleport into a shop.
+        c->endCombatMode();
+        c->clearAllAIGoals();
         mv->halt();
         mv->_setPositionDirectionAndTeleport(to, Ogre::Quaternion::IDENTITY);
         return true;
@@ -265,7 +269,9 @@ namespace
         {NODE_FIGHT, "9-KenshiRogue.mod", STARVING, 0, 3, 4, 5, "three starving bandits"},
         {NODE_FIGHT, "10-KenshiRogue.mod", DUST, 0, 2, 5, 5, "two dust bandits"},
         {NODE_ELITE, "11-KenshiRogue.mod", DUST, 2, 1, 4, 6, "a dust bandit boss"},
-        {NODE_ELITE, "12-KenshiRogue.mod", DUST, 2, 2, 6, 6, "a dust bandit boss and his second"},
+        // Off the map for now: 0/4 even with every fighting stat at 25
+        // (balance-levels.txt). Kept for a harder difficulty later.
+        {NODE_ELITE, "12-KenshiRogue.mod", DUST, 2, 2, 99, 99, "a dust bandit boss and his second"},
     };
     const int ENCOUNTER_COUNT = sizeof(ENCOUNTERS) / sizeof(ENCOUNTERS[0]);
     const Node REST_NODE = {NODE_REST, NULL, NULL, 0, 0, 1, 5, "rest"};
@@ -443,7 +449,7 @@ namespace
     {
         Faction* them = ou->factionMgr->getFactionByStringID(n.faction);
         lektor<RootObject*> found;
-        ou->getCharactersWithinSphere(found, g_run.spawnAt, 30.0f * METRE, 30.0f * METRE, 0.0f, 40, 40, NULL);
+        ou->getCharactersWithinSphere(found, g_run.spawnAt, 40.0f * METRE, 40.0f * METRE, 0.0f, 40, 40, NULL);
         GameData* kit = data(FIRST_AID);
         for (uint32_t i = 0; i < found.size(); ++i)
         {
@@ -1456,6 +1462,27 @@ namespace
         }
     }
 
+    // A level-up after every won fight: Kenshi's own growth is ~0.5-1 per
+    // stat per fight (full run, 2026-11-23), far too slow for the rows, which
+    // need ~15-20 by row 2-3 and ~25 by the boss (balance-levels.txt). The
+    // Slay the Spire card reward, in Kenshi's terms.
+    const StatsEnumerated LEVEL_STATS[] = {STAT_STRENGTH, STAT_MELEE_ATTACK, STAT_MELEE_DEFENCE, STAT_TOUGHNESS,
+                                           STAT_DEXTERITY, STAT_ATHLETICS, STAT_DODGE, STAT_HACKERS, STAT_KATANAS,
+                                           STAT_SABRES, STAT_BLUNT, STAT_HEAVYWEAPONS, STAT_POLEARMS};
+    const float LEVEL_UP = 3.0f, LEVEL_UP_ELITE = 5.0f;
+
+    void levelUp()
+    {
+        if (g_trialsRunning)
+            return;
+        float add = g_run.current.kind == NODE_ELITE ? LEVEL_UP_ELITE : LEVEL_UP;
+        for (size_t i = 0; i < g_run.runners.size(); ++i)
+            if (CharStats* st = g_run.runners[i] ? g_run.runners[i]->getStats() : NULL)
+                for (size_t k = 0; k < sizeof(LEVEL_STATS) / sizeof(LEVEL_STATS[0]); ++k)
+                    st->getStatRef(LEVEL_STATS[k]) += add;
+        hudNote("Victory: +" + toStr(add) + " to your fighting stats");
+    }
+
     void checkFight()
     {
         if (g_run.state != RUN_FIGHTING || g_frame % 15 != 0)
@@ -1483,7 +1510,7 @@ namespace
         DWORD since = GetTickCount() - g_run.fightStart;
         if (int(g_run.enemies.size()) < n.enemyCount)
         {
-            if (since < 5000)
+            if (since < 10000) // dust bandit squads sometimes appear late (balance-levels.txt)
             {
                 collectEnemies(n);
                 return;
@@ -1544,6 +1571,7 @@ namespace
         {
             ++g_run.fightsWon;
             g_run.state = RUN_BETWEEN;
+            levelUp();
             payCats();
             spawnAnkh();
         }
@@ -1744,7 +1772,8 @@ namespace
         std::map<std::string, int> taken;
         for (size_t e = 0; e < g_run.enemies.size(); ++e)
         {
-            Inventory* inv = g_run.enemies[e] ? g_run.enemies[e]->getInventory() : NULL;
+            // Only the beaten: a standing dust bandit was stripped of his boots (2026-11-23).
+            Inventory* inv = g_run.enemies[e] && out(g_run.enemies[e]) ? g_run.enemies[e]->getInventory() : NULL;
             if (!inv)
                 continue;
             std::vector<Item*> all;
