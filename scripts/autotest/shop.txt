@@ -1,0 +1,33 @@
+# A shop node: the runner is taken to a real town (The Hub: near kr-test),
+# with an ankh there and a 600 game-second timer; the arena clean-up stays
+# off in town; bowing brings the runner back to the arena and the next row.
+load kr-test
+wait_ready
+run_start
+wait_fight 240
+loot
+worship
+wait 6
+towns
+path
+shop The Hub
+path
+go shop
+wait 8
+people
+ankh
+strangers
+look_ankh
+wait 2
+screenshot shop-ankh
+select_runner
+wait 2
+screenshot shop-runner
+wait 20
+strangers
+worship
+wait 25
+people
+path
+expect state pathing
+quit

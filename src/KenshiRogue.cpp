@@ -30,6 +30,8 @@
 #include <kenshi/CharMovement.h>
 #include <kenshi/SaveManager.h>
 #include <kenshi/Enums.h>
+#include <kenshi/SharedKing.h>
+#include <kenshi/Town.h>
 #include <kenshi/Building/Building.h>
 #include <kenshi/CameraClass.h>
 #include <kenshi/Faction.h>
@@ -116,6 +118,11 @@ namespace
         GameSaveState* saveState, Building* isIndoorsOf, bool invisible, bool completed, bool isFoliage,
         int floorNumber, bool isOutsideFurniture);
     CreateBuildingFn g_createBuilding = NULL;
+
+    std::string factionNameOf(Faction* f)
+    {
+        return f ? f->getName() : std::string("(none)");
+    }
 
     int* factionMoney(Faction* f)
     {
@@ -224,7 +231,7 @@ namespace
     // after each row you choose the next node from two or three (Bill,
     // 2026-11-23: "back to our node map where they choose their next
     // engagement"); the last row is an elite.
-    enum NodeKind { NODE_FIGHT, NODE_REST, NODE_ELITE };
+    enum NodeKind { NODE_FIGHT, NODE_REST, NODE_ELITE, NODE_SHOP };
     struct Node
     {
         NodeKind kind;
@@ -249,10 +256,19 @@ namespace
     };
     const int ENCOUNTER_COUNT = sizeof(ENCOUNTERS) / sizeof(ENCOUNTERS[0]);
     const Node REST_NODE = {NODE_REST, NULL, NULL, 0, 0, 1, 5, "rest"};
+    // Shops are real towns (Bill, 2026-11-23): you're taken there to spend the
+    // run's cats at Kenshi's own traders, with a longer timer and an ankh to
+    // leave. The town is the node's label. Keeping you in town (the leash)
+    // waits on Bill's answer.
+    const char* SHOP_TOWNS[] = {"Stoat", "Squin", "The Hub", "Mongrel", "Shark", "Waystation"};
+    const int SHOP_TOWN_COUNT = sizeof(SHOP_TOWNS) / sizeof(SHOP_TOWNS[0]);
+    const DWORD SHOP_SECONDS = 600; // game seconds in town
     const int RUN_ROWS = 7;
 
     std::string nodeLabel(const Node& n)
     {
+        if (n.kind == NODE_SHOP)
+            return std::string("Shop: ") + n.label;
         return std::string(n.kind == NODE_REST ? "Rest" : n.kind == NODE_ELITE ? "Elite: " : "Fight: ") +
                (n.kind == NODE_REST ? "" : n.label);
     }
@@ -343,6 +359,8 @@ namespace
             g_run.runners.empty() ||
             g_frame % 30 != 0)
             return;
+        if (g_run.current.kind == NODE_SHOP)
+            return; // a town's people are the point of a shop
         Character* r = g_run.runners[0];
         lektor<RootObject*> found;
         ou->getCharactersWithinSphere(found, g_run.arena, ARENA_RADIUS_M * METRE, ARENA_RADIUS_M * METRE, 0.0f,
@@ -438,7 +456,7 @@ namespace
             g_run.lastResult = "the encounter's data is missing (is KenshiRogue.mod enabled?)";
             return;
         }
-        Ogre::Vector3 at = g_run.runners[0]->getPosition();
+        Ogre::Vector3 at = g_run.arena; // not the runner's position: just back from a shop, it may not have landed yet
         at.x += SPAWN_DISTANCE_M * METRE;
         // The runner as the squad's AI target: spawned without one, the
         // bandit stood 25 m away and never came (first run, 2026-11-23).
@@ -494,7 +512,10 @@ namespace
         g_run.bowSince = 0;
     }
 
-    void spawnAnkh()
+    // Beside the runner, or beside the given spot: a teleport takes a frame to land, so
+    // in a shop the runner's position is still the arena's (shop test,
+    // 2026-11-23: the ankh went up 683 m from the runner).
+    void spawnAnkh(const Ogre::Vector3* beside)
     {
         removeAnkh();
         GameData* d = data(ANKH);
@@ -504,7 +525,7 @@ namespace
             logLine("ankh: not made (no data or no runner); the timer still runs");
             return;
         }
-        Ogre::Vector3 at = g_run.runners[0]->getPosition();
+        Ogre::Vector3 at = beside ? *beside : g_run.runners[0]->getPosition();
         Ogre::Vector3 pos(at.x, 0.0f, at.z + ANKH_DISTANCE_M * METRE); // y 0: createBuilding adds the ground's height
         g_run.ankh = g_createBuilding(ou->theFactory, d, pos, NULL, ou->player->getFaction(),
                                       Ogre::Quaternion::IDENTITY, NULL, NULL, NULL, NULL, NULL, false, true, false, 0,
@@ -572,9 +593,113 @@ namespace
         }
     }
 
+    // The town called `name` with the most buildings (a name can have empty
+    // twins: Kenshi Town found two Hubs).
+    TownBase* findTown(const std::string& name)
+    {
+        if (!shou || !shou->townList)
+            return NULL;
+        lektor<RootObject*>& towns = shou->townList->getAllTowns();
+        TownBase* best = NULL;
+        size_t bestN = 0;
+        for (uint32_t i = 0; i < towns.size(); ++i)
+        {
+            TownBase* t = static_cast<TownBase*>(towns[i]);
+            if (!t || t->getName() != name)
+                continue;
+            TownBuildingsManager* mgr = t->getBuildingsManager();
+            size_t n = mgr ? mgr->buildingEntities.size() : 0;
+            if (!best || n > bestN)
+            {
+                best = t;
+                bestN = n;
+            }
+        }
+        return best;
+    }
+
+    // Runners to a spot, and kept trying until they land: a runner still
+    // bowing at an ankh ignores a teleport (shop test, 2026-11-23: the runner
+    // stayed in The Hub). Their ankh-use order is dropped first, and the
+    // teleport repeats each frame (up to 4 s) until they're within 20 m.
+    Ogre::Vector3 g_parkTo;
+    int g_parkFrames = 0;
+
+    void parkRunners(const Ogre::Vector3& at)
+    {
+        g_parkTo = at;
+        g_parkFrames = 240;
+        for (size_t i = 0; i < g_run.runners.size(); ++i)
+        {
+            g_run.runners[i]->removeJob(TaskType(87)); // the ankh's use (operate machinery)
+            park(g_run.runners[i], Ogre::Vector3(at.x + float(i) * 2.0f * METRE, at.y, at.z));
+        }
+    }
+
+    void keepParking()
+    {
+        if (g_parkFrames <= 0)
+            return;
+        --g_parkFrames;
+        bool all = true;
+        for (size_t i = 0; i < g_run.runners.size(); ++i)
+        {
+            Ogre::Vector3 want(g_parkTo.x + float(i) * 2.0f * METRE, g_parkTo.y, g_parkTo.z);
+            Ogre::Vector3 p = g_run.runners[i]->getPosition();
+            float dx = p.x - want.x, dz = p.z - want.z;
+            if (dx * dx + dz * dz < 20.0f * METRE * 20.0f * METRE)
+                continue;
+            all = false;
+            if (g_parkFrames % 10 == 0)
+            {
+                g_run.runners[i]->removeJob(TaskType(87));
+                park(g_run.runners[i], want);
+            }
+        }
+        if (all)
+        {
+            logLine("park: everyone landed");
+            g_parkFrames = 0;
+        }
+        else if (g_parkFrames == 0)
+            logLine("park: a runner didn't land");
+    }
+
+    void spawnAnkh(const Ogre::Vector3* beside = NULL);
+
+    void goShopping(const Node& n)
+    {
+        TownBase* t = findTown(n.label);
+        if (!t || g_run.runners.empty())
+        {
+            logLine(std::string("shop: no town called ") + n.label + "; the ankh is here instead");
+            g_run.state = RUN_BETWEEN;
+            spawnAnkh();
+            return;
+        }
+        Ogre::Vector3 c = t->getPosition();
+        parkRunners(c);
+        ou->player->focusCamera(c);
+        g_run.state = RUN_BETWEEN;
+        DWORD normal = AFTER_NODE_SECONDS;
+        AFTER_NODE_SECONDS = SHOP_SECONDS;
+        spawnAnkh(&c);
+        AFTER_NODE_SECONDS = normal;
+        std::ostringstream o;
+        o << "shop: in " << t->getName() << " at " << int(c.x) << "," << int(c.y) << "," << int(c.z) << " ("
+          << factionNameOf(t->getFaction()) << ")";
+        logLine(o.str());
+    }
+
     void play(const Node& n)
     {
         g_run.current = n;
+        if (n.kind == NODE_SHOP)
+        {
+            logLine("row " + toStr(float(g_run.node)) + ": " + nodeLabel(n));
+            goShopping(n);
+            return;
+        }
         logLine("row " + toStr(float(g_run.node)) + ": " + nodeLabel(n));
         if (n.kind == NODE_REST)
         {
@@ -610,10 +735,19 @@ namespace
                 offer.push_back(fights[j]);
                 fights.erase(fights.begin() + j);
             }
-            if (!elites.empty() && rand() % 3 == 0)
-                offer.push_back(elites[size_t(rand()) % elites.size()]);
-            else if (g_run.current.kind != NODE_REST && REST_NODE.minRow <= row && row <= REST_NODE.maxRow)
-                offer.push_back(REST_NODE);
+            // The third: an elite, a shop or a rest, whichever this row allows.
+            std::vector<Node> third;
+            if (!elites.empty())
+                third.push_back(elites[size_t(rand()) % elites.size()]);
+            if (row >= 2 && row <= RUN_ROWS - 2 && g_run.current.kind != NODE_SHOP)
+            {
+                Node shop = {NODE_SHOP, NULL, NULL, 0, 0, 2, RUN_ROWS - 2, SHOP_TOWNS[rand() % SHOP_TOWN_COUNT]};
+                third.push_back(shop);
+            }
+            if (g_run.current.kind != NODE_REST && REST_NODE.minRow <= row && row <= REST_NODE.maxRow)
+                third.push_back(REST_NODE);
+            if (!third.empty())
+                offer.push_back(third[size_t(rand()) % third.size()]);
         }
         if (offer.empty())
             offer.push_back(ENCOUNTERS[0]);
@@ -665,6 +799,12 @@ namespace
         if (left)
             logLine("the last fight's " + toStr(float(left)) + " enemies left");
         g_run.enemies.clear();
+        if (g_run.current.kind == NODE_SHOP && g_run.node >= 0)
+        {
+            parkRunners(g_run.arena);
+            ou->player->focusCamera(g_run.arena);
+            logLine("shop: back to the arena");
+        }
         g_run.node = next;
         if (next == 0)
         {
@@ -1013,7 +1153,8 @@ namespace
             {
                 DWORD left = g_run.ankhUntil > g_gameClock ? DWORD(g_run.ankhUntil - g_gameClock) : 0;
                 std::ostringstream o;
-                o << "Rogue: bow at the ankh (" << left / 60 << ":" << (left % 60 < 10 ? "0" : "") << left % 60 << ")";
+                o << "Rogue: " << (g_run.current.kind == NODE_SHOP ? std::string("in ") + g_run.current.label + ", " : "")
+                  << "bow at the ankh (" << left / 60 << ":" << (left % 60 < 10 ? "0" : "") << left % 60 << ")";
                 return o.str();
             }
             return g_run.node + 1 < RUN_ROWS ? "Rogue: move on" : "Rogue: finish run";
@@ -1375,6 +1516,43 @@ namespace
                 g_startWeapon = rest;
             return true;
         }
+        if (cmd == "shop") // shop <town>: put that town on offer as the path's third choice (to test a shop)
+        {
+            static std::string town;
+            town = rest;
+            Node shop = {NODE_SHOP, NULL, NULL, 0, 0, 0, RUN_ROWS, town.c_str()};
+            if (g_run.state == RUN_PATHING)
+            {
+                if (g_run.choices.size() >= 3)
+                    g_run.choices.pop_back();
+                g_run.choices.push_back(shop);
+            }
+            atCheck(g_run.state == RUN_PATHING && findTown(town) != NULL, "shop on offer: " + town);
+            return true;
+        }
+        if (cmd == "towns") // towns: every town name and building count, for SHOP_TOWNS
+        {
+            std::ostringstream o;
+            o << "towns:";
+            if (shou && shou->townList)
+            {
+                lektor<RootObject*>& towns = shou->townList->getAllTowns();
+                std::map<std::string, size_t> seen;
+                for (uint32_t i = 0; i < towns.size(); ++i)
+                {
+                    TownBase* t = static_cast<TownBase*>(towns[i]);
+                    TownBuildingsManager* mgr = t ? t->getBuildingsManager() : NULL;
+                    size_t n = mgr ? mgr->buildingEntities.size() : 0;
+                    if (t && n > seen[t->getName()])
+                        seen[t->getName()] = n;
+                }
+                for (std::map<std::string, size_t>::iterator i = seen.begin(); i != seen.end(); ++i)
+                    if (i->second >= 5)
+                        o << " " << i->first << " (" << i->second << ");";
+            }
+            atWrite("INFO", o.str());
+            return true;
+        }
         if (cmd == "path") // path: the choices on offer
         {
             std::ostringstream o;
@@ -1387,9 +1565,10 @@ namespace
         if (cmd == "go") // go <i|fight|rest|elite>: what clicking that path choice does (a kind: the first of it, if offered)
         {
             size_t pickI = g_run.choices.size();
-            if (rest == "fight" || rest == "rest" || rest == "elite")
+            if (rest == "fight" || rest == "rest" || rest == "elite" || rest == "shop")
             {
-                NodeKind want = rest == "fight" ? NODE_FIGHT : rest == "rest" ? NODE_REST : NODE_ELITE;
+                NodeKind want = rest == "fight" ? NODE_FIGHT : rest == "rest" ? NODE_REST
+                                : rest == "elite" ? NODE_ELITE : NODE_SHOP;
                 for (size_t i = 0; i < g_run.choices.size() && pickI == g_run.choices.size(); ++i)
                     if (g_run.choices[i].kind == want)
                         pickI = i;
@@ -1788,6 +1967,7 @@ namespace
                 g_hud->setVisible(false);
             return;
         }
+        keepParking();
         holdWounds();
         checkFight();
         watchAnkh();

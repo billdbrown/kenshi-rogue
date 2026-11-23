@@ -95,6 +95,20 @@ plays it unattended.
   character out.
 - **A heavy starting weapon costs Attack:** a Horse Chopper at Strength 10 showed Attack 5 (−5).
 
+## As built (2026-11-23, after Bill's direction)
+
+- **Boons**: three of a pool, in a Kenshi window, before row 0.
+- **The path**: seven rows. Row 0 is the starving bandit. Each later row offers two fights from a
+  pool for that depth and a third that is an elite, a rest or a **shop**. The last row is an elite.
+- **The ankh** after each node: bow (stand at its origin 1.5 s) or wait out the timer (180 game
+  seconds, 600 in a shop; game time, so pausing stops it).
+- **Shops**: the runner is teleported to the town's centre (only The Hub tested), with an ankh
+  there. The arena clean-up is off in towns. Bowing brings them back to the arena. **Keeping them
+  in town isn't built**: the leash waits on Bill.
+- **Cats** per won fight, by row, double for an elite. **No natural healing**.
+- **Teleports retry until they land.** A runner still bowing ignores one, so their ankh-use
+  order is dropped and the teleport repeats each frame (up to 4 s).
+
 ## First win rates (trials, 2026-11-23)
 
 A fresh runner each bout: Strength, Dexterity, Toughness, Athletics and every melee skill at 10,
