@@ -1,4 +1,4 @@
-# Win rates: each fight of the slice, played again and again with a fresh
+# Win rates: fight 1 (encounter 0) and two starving bandits (encounter 3), played again and again with a fresh
 # fixed-stat runner, for three starting weapons. Game speed 3; times are
 # real seconds. The tuning tool from docs/design.md.
 load kr-test
@@ -9,14 +9,14 @@ wait 2
 # Horse Chopper (heavy: Attack showed 5 (-5) at Strength 10)
 weapon 475-gamedata.base
 trials 0 6 120
-trials 2 6 120
+trials 3 6 120
 # Ringed Sabre
 weapon 903-gamedata.base
 trials 0 6 120
-trials 2 6 120
+trials 3 6 120
 # Katana
 weapon 476-gamedata.base
 trials 0 6 120
-trials 2 6 120
+trials 3 6 120
 strangers
 quit

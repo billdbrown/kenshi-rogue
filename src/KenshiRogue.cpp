@@ -62,13 +62,14 @@ namespace
     const char* SQUAD_TWO_BANDITS = "2-KenshiRogue.mod"; // "Kenshi Rogue: two starving bandits"
     const char* RUNNER_TEMPLATE = "2205-gamedata.base";  // Drifter
     const char* RUNNER_NAME = "Runner";
-    const char* ENEMY_FACTION = "1305-gamedata.base";    // Starving Bandits
 
     // Starting weapon: a Horse Chopper, Rusted Junk grade.
     const char* START_WEAPON = "475-gamedata.base";      // Horse Chopper
     const char* GRADE_MAKER = "912-gamedata.base";       // "Unknown" maker, the one with Rusted Junk
     const char* GRADE_RUSTED_JUNK = "913-gamedata.base"; // MaterialSpecsWeapon "Rusted Junk"
     const char* FIRST_AID = "209-gamedata.base";         // Basic First Aid Kit
+    const char* RAG_SHIRT = "2309-clothes_v1.mod";       // Rag Shirt
+    const char* RAG_PANTS = "551-gamedata.base";         // Halfpants (ragged)
     const char* ANKH = "6-KenshiRogue.mod";              // "Kenshi Rogue: ankh"
 
     // After a node: bow at the ankh to move on (Bill, 2026-11-23). A soft
@@ -219,29 +220,51 @@ namespace
 
     // ==== The run =================================================================
 
-    enum NodeKind { NODE_FIGHT, NODE_REST };
+    // A run is RUN_ROWS rows. Row 0 is always the single starving bandit;
+    // after each row you choose the next node from two or three (Bill,
+    // 2026-11-23: "back to our node map where they choose their next
+    // engagement"); the last row is an elite.
+    enum NodeKind { NODE_FIGHT, NODE_REST, NODE_ELITE };
     struct Node
     {
         NodeKind kind;
-        const char* squad; // fights
-        int firstAidKits;  // fights: kits each enemy carries
-        int enemyCount;    // fights: how many the squad has (must match KenshiRogue.mod)
+        const char* squad;   // fights: the squad in KenshiRogue.mod
+        const char* faction; // fights: whose they are
+        int firstAidKits;    // fights: kits each enemy carries
+        int enemyCount;      // fights: how many the squad has (must match KenshiRogue.mod)
+        int minRow, maxRow;  // the rows it can be offered in
         const char* label;
     };
-    // The first slice. Fight 1 is always the single starving bandit.
-    const Node NODES[] = {
-        {NODE_FIGHT, SQUAD_ONE_BANDIT, 1, 1, "Fight 1: a starving bandit"},
-        {NODE_REST, NULL, 0, 0, "Rest"},
-        {NODE_FIGHT, SQUAD_TWO_BANDITS, 0, 2, "Fight 2: two starving bandits"},
+    const char* STARVING = "1305-gamedata.base"; // Starving Bandits
+    const char* DUST = "200-gamedata.base";      // Dust Bandits
+    const Node ENCOUNTERS[] = {
+        {NODE_FIGHT, SQUAD_ONE_BANDIT, STARVING, 1, 1, 0, 0, "a starving bandit"},
+        {NODE_FIGHT, "7-KenshiRogue.mod", STARVING, 1, 1, 1, 2, "a hungry bandit leader"},
+        {NODE_FIGHT, "8-KenshiRogue.mod", DUST, 0, 1, 1, 3, "a dust bandit"},
+        {NODE_FIGHT, SQUAD_TWO_BANDITS, STARVING, 0, 2, 2, 4, "two starving bandits"},
+        {NODE_FIGHT, "9-KenshiRogue.mod", STARVING, 0, 3, 3, 5, "three starving bandits"},
+        {NODE_FIGHT, "10-KenshiRogue.mod", DUST, 0, 2, 4, 5, "two dust bandits"},
+        {NODE_ELITE, "11-KenshiRogue.mod", DUST, 2, 1, 3, 6, "a dust bandit boss"},
+        {NODE_ELITE, "12-KenshiRogue.mod", DUST, 2, 2, 5, 6, "a dust bandit boss and his second"},
     };
-    const int NODE_COUNT = sizeof(NODES) / sizeof(NODES[0]);
+    const int ENCOUNTER_COUNT = sizeof(ENCOUNTERS) / sizeof(ENCOUNTERS[0]);
+    const Node REST_NODE = {NODE_REST, NULL, NULL, 0, 0, 1, 5, "rest"};
+    const int RUN_ROWS = 7;
 
-    enum RunState { RUN_NONE, RUN_FIGHTING, RUN_BETWEEN, RUN_WON, RUN_LOST, RUN_CHOOSING };
+    std::string nodeLabel(const Node& n)
+    {
+        return std::string(n.kind == NODE_REST ? "Rest" : n.kind == NODE_ELITE ? "Elite: " : "Fight: ") +
+               (n.kind == NODE_REST ? "" : n.label);
+    }
+
+    enum RunState { RUN_NONE, RUN_FIGHTING, RUN_BETWEEN, RUN_WON, RUN_LOST, RUN_CHOOSING, RUN_PATHING };
 
     struct Run
     {
         RunState state;
-        int node;                       // the node being played or just finished
+        int node;                       // the row being played or just finished (-1 before the first)
+        Node current;                   // what that row's node is
+        std::vector<Node> choices;      // the next row's offer, while choosing
         Ogre::Vector3 arena;
         std::vector<Character*> runners;
         std::vector<Character*> enemies;    // the current (or last) fight's
@@ -256,7 +279,7 @@ namespace
         DWORD bowSince;                // when a runner started bowing (0: nobody)
         int catsEarned;
         std::map<MedicalSystem::HealthPartStatus*, float> fleshCap; // no natural healing: flesh never rises past this
-        Run() : state(RUN_NONE), node(-1), fightStart(0), fightsWon(0), strangersRemoved(0), ankh(NULL), ankhUntil(0),
+        Run() : state(RUN_NONE), node(-1), current(ENCOUNTERS[0]), fightStart(0), fightsWon(0), strangersRemoved(0), ankh(NULL), ankhUntil(0),
               bowSince(0), catsEarned(0) {}
     };
     Run g_run;
@@ -315,7 +338,9 @@ namespace
     // thorough version; this is the slice's.
     void keepArenaQuiet()
     {
-        if ((g_run.state != RUN_FIGHTING && g_run.state != RUN_BETWEEN) || g_run.runners.empty() ||
+        if ((g_run.state != RUN_FIGHTING && g_run.state != RUN_BETWEEN && g_run.state != RUN_CHOOSING &&
+             g_run.state != RUN_PATHING) ||
+            g_run.runners.empty() ||
             g_frame % 30 != 0)
             return;
         Character* r = g_run.runners[0];
@@ -354,6 +379,13 @@ namespace
         std::ostringstream note;
         note << "runner: template's " << stripItems(c) << " items removed";
         logLine(note.str());
+        // Rags: stripping the template took its clothes too (the runner fought
+        // in underwear, 2026-11-23).
+        const char* rags[] = {RAG_SHIRT, RAG_PANTS};
+        for (int k = 0; k < 2; ++k)
+            if (Item* it = makeItem(data(rags[k]), NULL, NULL))
+                if (c->giveItem(it, false, true) && c->getInventory())
+                    c->getInventory()->equipItem(it);
         Item* w = makeItem(data(g_startWeapon.c_str()), data(GRADE_MAKER), data(GRADE_RUSTED_JUNK));
         if (!w)
             logLine("runner's weapon: not made");
@@ -374,7 +406,7 @@ namespace
     // kits and the order to attack.
     void collectEnemies(const Node& n)
     {
-        Faction* them = ou->factionMgr->getFactionByStringID(ENEMY_FACTION);
+        Faction* them = ou->factionMgr->getFactionByStringID(n.faction);
         lektor<RootObject*> found;
         ou->getCharactersWithinSphere(found, g_run.spawnAt, 30.0f * METRE, 30.0f * METRE, 0.0f, 40, 40, NULL);
         GameData* kit = data(FIRST_AID);
@@ -396,7 +428,8 @@ namespace
     void startFight(const Node& n)
     {
         g_run.enemies.clear();
-        Faction* them = ou->factionMgr->getFactionByStringID(ENEMY_FACTION);
+        g_run.current = n;
+        Faction* them = ou->factionMgr->getFactionByStringID(n.faction);
         GameData* squad = data(n.squad);
         if (!them || !squad)
         {
@@ -491,11 +524,9 @@ namespace
 
     void payCats()
     {
-        int fight = 0;
-        for (int i = 0; i <= g_run.node && i < NODE_COUNT; ++i)
-            if (NODES[i].kind == NODE_FIGHT)
-                ++fight;
-        int cats = (CATS_MIN + rand() % (CATS_MAX - CATS_MIN + 1)) * (fight > 0 ? fight : 1);
+        // More the deeper the row, and double for an elite.
+        int cats = (CATS_MIN + rand() % (CATS_MAX - CATS_MIN + 1)) * (g_run.node + 1) *
+                   (g_run.current.kind == NODE_ELITE ? 2 : 1);
         int* money = factionMoney(ou->player->getFaction());
         if (money)
             *money += cats;
@@ -541,6 +572,67 @@ namespace
         }
     }
 
+    void play(const Node& n)
+    {
+        g_run.current = n;
+        logLine("row " + toStr(float(g_run.node)) + ": " + nodeLabel(n));
+        if (n.kind == NODE_REST)
+        {
+            rest();
+            g_run.lastResult = "rested";
+            g_run.state = RUN_BETWEEN;
+            spawnAnkh();
+            return;
+        }
+        startFight(n);
+    }
+
+    // ---- The path: the next row's choices -----------------------------------
+
+    void showChoices(const char* title, const std::vector<std::string>& labels, void (*pick)(size_t));
+    void goPath(size_t i);
+
+    void offerPath()
+    {
+        int row = g_run.node;
+        std::vector<Node> fights, elites;
+        for (int i = 0; i < ENCOUNTER_COUNT; ++i)
+            if (ENCOUNTERS[i].minRow <= row && row <= ENCOUNTERS[i].maxRow)
+                (ENCOUNTERS[i].kind == NODE_ELITE ? elites : fights).push_back(ENCOUNTERS[i]);
+        std::vector<Node> offer;
+        if (row == RUN_ROWS - 1)
+            offer = elites; // the last row: an elite
+        else
+        {
+            for (int k = 0; k < 2 && !fights.empty(); ++k)
+            {
+                size_t j = size_t(rand()) % fights.size();
+                offer.push_back(fights[j]);
+                fights.erase(fights.begin() + j);
+            }
+            if (!elites.empty() && rand() % 3 == 0)
+                offer.push_back(elites[size_t(rand()) % elites.size()]);
+            else if (g_run.current.kind != NODE_REST && REST_NODE.minRow <= row && row <= REST_NODE.maxRow)
+                offer.push_back(REST_NODE);
+        }
+        if (offer.empty())
+            offer.push_back(ENCOUNTERS[0]);
+        g_run.choices = offer;
+        g_run.state = RUN_PATHING;
+        std::vector<std::string> labels;
+        std::ostringstream o;
+        o << "row " << row << " of " << RUN_ROWS - 1 << ", offered:";
+        for (size_t i = 0; i < offer.size(); ++i)
+        {
+            labels.push_back(nodeLabel(offer[i]));
+            o << " [" << i << "] " << labels.back() << ";";
+        }
+        logLine(o.str());
+        std::ostringstream title;
+        title << "Choose your path (" << row << " of " << RUN_ROWS - 1 << ")";
+        showChoices(title.str().c_str(), labels, goPath);
+    }
+
     // Moves the run on: start it, or play the next node.
     void advance()
     {
@@ -553,7 +645,7 @@ namespace
         int next = g_run.node + 1;
         removeAnkh();
         g_run.ankhUntil = 0;
-        if (next >= NODE_COUNT)
+        if (next >= RUN_ROWS)
         {
             g_run.state = RUN_WON;
             g_run.lastResult = "run complete";
@@ -574,16 +666,12 @@ namespace
             logLine("the last fight's " + toStr(float(left)) + " enemies left");
         g_run.enemies.clear();
         g_run.node = next;
-        const Node& n = NODES[next];
-        if (n.kind == NODE_REST)
+        if (next == 0)
         {
-            rest();
-            g_run.lastResult = "rested";
-            g_run.state = RUN_BETWEEN;
-            spawnAnkh();
+            play(ENCOUNTERS[0]); // always the starving bandit
             return;
         }
-        startFight(n);
+        offerPath();
     }
 
     // ---- Boons: a run opens with a choice of three (Bill, 2026-11-23) ------
@@ -598,7 +686,6 @@ namespace
         std::string label;
     };
     std::vector<Boon> g_offer;
-    MyGUI::Window* g_boonWindow = NULL;
     bool g_atBoons = false; // scenarios skip the choice unless they ask for it (`boons on`)
 
     const char* MIDGRADE_MAKER = "917-gamedata.base"; // "Ancient": its grades are Mid-Grade Salvage, (Old) Refitted
@@ -690,9 +777,44 @@ namespace
 
     void advance();
     void choose(size_t i);
-    void onBoon0(MyGUI::WidgetPtr) { choose(0); }
-    void onBoon1(MyGUI::WidgetPtr) { choose(1); }
-    void onBoon2(MyGUI::WidgetPtr) { choose(2); }
+
+    // One small Kenshi window of up to three buttons: boons, and the path.
+    MyGUI::Window* g_choiceWindow = NULL;
+    void (*g_choicePick)(size_t) = NULL;
+    std::string g_choiceTitle;
+    std::vector<std::string> g_choiceLabels;
+    void onChoice0(MyGUI::WidgetPtr) { if (g_choicePick) g_choicePick(0); }
+    void onChoice1(MyGUI::WidgetPtr) { if (g_choicePick) g_choicePick(1); }
+    void onChoice2(MyGUI::WidgetPtr) { if (g_choicePick) g_choicePick(2); }
+
+    void closeChoices()
+    {
+        if (g_choiceWindow && MyGUI::Gui::getInstancePtr())
+            MyGUI::Gui::getInstancePtr()->destroyWidget(g_choiceWindow);
+        g_choiceWindow = NULL;
+    }
+
+    void showChoices(const char* title, const std::vector<std::string>& labels, void (*pick)(size_t))
+    {
+        g_choiceTitle = title;
+        g_choiceLabels = labels;
+        g_choicePick = pick;
+        closeChoices();
+        MyGUI::Gui* gui = MyGUI::Gui::getInstancePtr();
+        if (!gui)
+            return;
+        g_choiceWindow = gui->createWidgetReal<MyGUI::Window>("Kenshi_WindowCX", 0.36f, 0.30f, 0.28f, 0.30f,
+                                                              MyGUI::Align::Default, "Window", "KenshiRogueChoice");
+        g_choiceWindow->setCaption(title);
+        void (*clicks[])(MyGUI::WidgetPtr) = {onChoice0, onChoice1, onChoice2};
+        for (size_t i = 0; i < labels.size() && i < 3; ++i)
+        {
+            MyGUI::Button* b = g_choiceWindow->getClientWidget()->createWidgetReal<MyGUI::Button>(
+                "Kenshi_Button1", 0.05f, 0.06f + 0.31f * float(i), 0.90f, 0.25f, MyGUI::Align::Default);
+            b->setCaption(labels[i]);
+            b->eventMouseButtonClick += MyGUI::newDelegate(clicks[i]);
+        }
+    }
 
     void offerBoons()
     {
@@ -710,22 +832,10 @@ namespace
         for (size_t i = 0; i < g_offer.size(); ++i)
             o << " [" << i << "] " << g_offer[i].label << ";";
         logLine(o.str());
-        MyGUI::Gui* gui = MyGUI::Gui::getInstancePtr();
-        if (!gui)
-            return;
-        if (g_boonWindow)
-            gui->destroyWidget(g_boonWindow);
-        g_boonWindow = gui->createWidgetReal<MyGUI::Window>("Kenshi_WindowCX", 0.36f, 0.30f, 0.28f, 0.30f,
-                                                            MyGUI::Align::Default, "Window", "KenshiRogueBoons");
-        g_boonWindow->setCaption("Choose a boon");
-        void (*clicks[])(MyGUI::WidgetPtr) = {onBoon0, onBoon1, onBoon2};
+        std::vector<std::string> labels;
         for (size_t i = 0; i < g_offer.size(); ++i)
-        {
-            MyGUI::Button* b = g_boonWindow->getClientWidget()->createWidgetReal<MyGUI::Button>(
-                "Kenshi_Button1", 0.05f, 0.06f + 0.31f * float(i), 0.90f, 0.25f, MyGUI::Align::Default);
-            b->setCaption(g_offer[i].label);
-            b->eventMouseButtonClick += MyGUI::newDelegate(clicks[i]);
-        }
+            labels.push_back(g_offer[i].label);
+        showChoices("Choose a boon", labels, choose);
     }
 
     void choose(size_t i)
@@ -733,11 +843,19 @@ namespace
         if (g_run.state != RUN_CHOOSING || i >= g_offer.size())
             return;
         logLine("boon chosen: " + applyBoon(g_offer[i]));
-        if (g_boonWindow && MyGUI::Gui::getInstancePtr())
-            MyGUI::Gui::getInstancePtr()->destroyWidget(g_boonWindow);
-        g_boonWindow = NULL;
-        g_run.state = RUN_BETWEEN; // node -1: advance() plays node 0
+        closeChoices();
+        g_run.state = RUN_BETWEEN; // row -1: advance() plays row 0
         advance();
+    }
+
+    void goPath(size_t i)
+    {
+        if (g_run.state != RUN_PATHING || i >= g_run.choices.size())
+            return;
+        closeChoices();
+        Node n = g_run.choices[i];
+        g_run.choices.clear();
+        play(n);
     }
 
     bool runStart(float offsetX_m, float offsetZ_m)
@@ -837,7 +955,7 @@ namespace
                 if (!out(g_run.enemies[i]))
                     g_run.enemies[i]->attackTarget(g_run.runners[0]);
         }
-        const Node& n = NODES[g_run.node];
+        const Node& n = g_run.current;
         DWORD since = GetTickCount() - g_run.fightStart;
         if (int(g_run.enemies.size()) < n.enemyCount)
         {
@@ -862,7 +980,7 @@ namespace
         if (!enemiesOut && !runnersOut)
             return;
         std::ostringstream o;
-        o << NODES[g_run.node].label << ": " << (runnersOut ? "LOST" : "WON") << " in "
+        o << "row " << g_run.node << ", " << nodeLabel(g_run.current) << ": " << (runnersOut ? "LOST" : "WON") << " in "
           << (GetTickCount() - g_run.fightStart) / 1000 << " s; runner " << health(g_run.runners[0]);
         g_run.lastResult = o.str();
         logLine(g_run.lastResult);
@@ -889,7 +1007,7 @@ namespace
         case RUN_NONE:
             return "Rogue: start run";
         case RUN_FIGHTING:
-            return std::string("Rogue: ") + NODES[g_run.node].label;
+            return "Rogue: " + nodeLabel(g_run.current);
         case RUN_BETWEEN:
             if (g_run.ankhUntil)
             {
@@ -898,14 +1016,15 @@ namespace
                 o << "Rogue: bow at the ankh (" << left / 60 << ":" << (left % 60 < 10 ? "0" : "") << left % 60 << ")";
                 return o.str();
             }
-            return g_run.node + 1 < NODE_COUNT ? std::string("Rogue: next, ") + NODES[g_run.node + 1].label
-                                               : "Rogue: finish run";
+            return g_run.node + 1 < RUN_ROWS ? "Rogue: move on" : "Rogue: finish run";
         case RUN_WON:
             return "Rogue: run complete";
         case RUN_LOST:
             return "Rogue: run lost";
         case RUN_CHOOSING:
             return "Rogue: choose a boon";
+        case RUN_PATHING:
+            return "Rogue: choose your path";
         }
         return "Rogue";
     }
@@ -916,6 +1035,8 @@ namespace
             runStart(ARENA_OFFSET_M, 0.0f);
         else if (g_run.state == RUN_FIGHTING && !g_run.runners.empty())
             ou->player->focusCamera(g_run.runners[0]->getPosition());
+        else if (g_run.state == RUN_CHOOSING || g_run.state == RUN_PATHING)
+            showChoices(g_choiceTitle.c_str(), g_choiceLabels, g_choicePick); // closed by mistake: back again
         else
             advance();
     }
@@ -1026,7 +1147,7 @@ namespace
 
     const char* stateName(RunState s)
     {
-        const char* n[] = {"none", "fighting", "between", "won", "lost", "choosing"};
+        const char* n[] = {"none", "fighting", "between", "won", "lost", "choosing", "pathing"};
         return n[s];
     }
 
@@ -1189,7 +1310,7 @@ namespace
         {
             advance();
             atWrite("INFO", std::string("next: now ") + stateName(g_run.state) + ", node " +
-                                (g_run.node >= 0 && g_run.node < NODE_COUNT ? NODES[g_run.node].label : "-"));
+                                (g_run.node >= 0 ? nodeLabel(g_run.current) : std::string("-")));
             return true;
         }
         if (cmd == "loot")
@@ -1254,7 +1375,36 @@ namespace
                 g_startWeapon = rest;
             return true;
         }
-        if (cmd == "trials") // trials <node> <times> [secs]: that fight again and again, a fresh runner each bout
+        if (cmd == "path") // path: the choices on offer
+        {
+            std::ostringstream o;
+            o << "row " << g_run.node << ", state " << stateName(g_run.state) << "; offered:";
+            for (size_t i = 0; i < g_run.choices.size(); ++i)
+                o << " [" << i << "] " << nodeLabel(g_run.choices[i]) << ";";
+            atWrite("INFO", o.str());
+            return true;
+        }
+        if (cmd == "go") // go <i|fight|rest|elite>: what clicking that path choice does (a kind: the first of it, if offered)
+        {
+            size_t pickI = g_run.choices.size();
+            if (rest == "fight" || rest == "rest" || rest == "elite")
+            {
+                NodeKind want = rest == "fight" ? NODE_FIGHT : rest == "rest" ? NODE_REST : NODE_ELITE;
+                for (size_t i = 0; i < g_run.choices.size() && pickI == g_run.choices.size(); ++i)
+                    if (g_run.choices[i].kind == want)
+                        pickI = i;
+                if (pickI == g_run.choices.size())
+                    pickI = 0; // not offered: the first choice
+            }
+            else
+                std::istringstream(rest) >> pickI;
+            bool ok = g_run.state == RUN_PATHING && pickI < g_run.choices.size();
+            atCheck(ok, "go " + rest + (ok ? " -> " + nodeLabel(g_run.choices[pickI]) : std::string("")));
+            if (ok)
+                goPath(pickI);
+            return true;
+        }
+        if (cmd == "trials") // trials <encounter> <times> [secs]: that fight again and again, a fresh runner each bout
         {
             static int node = 0, left = 0, won = 0, lost = 0, undecided = 0, secs = 180, wonBefore = 0;
             static bool running = false, inBout = false;
@@ -1265,7 +1415,7 @@ namespace
                 node = 0;
                 secs = 180;
                 std::istringstream(rest) >> node >> n >> secs;
-                if (node < 0 || node >= NODE_COUNT || NODES[node].kind != NODE_FIGHT || g_run.runners.empty())
+                if (node < 0 || node >= ENCOUNTER_COUNT || g_run.runners.empty())
                 {
                     atCheck(false, "trials: node " + rest + " is not a fight, or no run is going");
                     return true;
@@ -1307,7 +1457,7 @@ namespace
             {
                 running = false;
                 std::ostringstream o;
-                o << "trials of " << NODES[node].label << " with " << g_startWeapon << ": " << won << " won, " << lost
+                o << "trials of " << ENCOUNTERS[node].label << " with " << g_startWeapon << ": " << won << " won, " << lost
                   << " lost, " << undecided << " undecided (secs and result:" << times << ")";
                 atWrite("INFO", o.str());
                 return true;
@@ -1333,9 +1483,8 @@ namespace
                 return true;
             }
             g_run.runners.push_back(r);
-            g_run.node = node;
             wonBefore = g_run.fightsWon;
-            startFight(NODES[node]);
+            startFight(ENCOUNTERS[node]);
             inBout = true;
             return false;
         }
@@ -1525,6 +1674,12 @@ namespace
             }
             else
                 atCheck(false, "unknown expect: " + rest);
+            return true;
+        }
+        if (cmd == "stop_if_lost") // stop_if_lost: end the scenario here if the run is lost
+        {
+            if (g_run.state == RUN_LOST)
+                atFinish("run lost at row " + toStr(float(g_run.node)));
             return true;
         }
         if (cmd == "quit")

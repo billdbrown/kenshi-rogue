@@ -1,0 +1,81 @@
+# A whole run, unattended: seven rows. Fight 1 is the starving bandit; then
+# each row takes a fight (or a rest when offered, every other row), bows at
+# the ankh after each node, and stops if the run is lost. Speed 3.
+load kr-test
+wait_ready
+speed 3
+run_start
+wait_fight 240
+stop_if_lost
+loot
+ankh
+worship
+wait 6
+# row 1
+path
+go fight
+wait 3
+wait_fight 300
+runner
+stop_if_lost
+loot
+ankh
+worship
+wait 6
+# row 2
+path
+go rest
+wait 3
+wait_fight 300
+runner
+stop_if_lost
+loot
+ankh
+worship
+wait 6
+# row 3
+path
+go fight
+wait 3
+wait_fight 300
+runner
+stop_if_lost
+loot
+ankh
+worship
+wait 6
+# row 4
+path
+go rest
+wait 3
+wait_fight 300
+runner
+stop_if_lost
+loot
+ankh
+worship
+wait 6
+# row 5
+path
+go fight
+wait 3
+wait_fight 300
+runner
+stop_if_lost
+loot
+ankh
+worship
+wait 6
+# row 6
+path
+go rest
+wait 3
+wait_fight 300
+runner
+stop_if_lost
+loot
+ankh
+worship
+wait 6
+expect state won
+quit

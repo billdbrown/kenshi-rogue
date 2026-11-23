@@ -20,6 +20,13 @@ leader"), and 0 or 1 more.
                         a throne's, with the fogmen's bowing for sitting, as in
                         Kenshi Town.
 
+  7..12-KenshiRogue.mod  the encounter pool past the first fight (see the
+                        plugin's ENCOUNTERS): a hungry bandit leader, a dust
+                        bandit, three starving bandits, two dust bandits, a
+                        dust bandit boss, and the boss with a second. Dust
+                        bandit squads keep only the plain roaming AI package
+                        (the vanilla one also raids towns).
+
 The plugin refers to all of these by their stringIds.
 
     python -I scripts/make_mod.py <Kenshi\\mods\\KenshiRogue>
@@ -35,6 +42,11 @@ import kmod  # noqa: E402
 DEPENDENCIES = ["gamedata.base", "Newwworld.mod", "rebirth.mod", "Dialogue.mod"]
 STARVING_MOB = ("1307-gamedata.base", "Starving bandit mob")
 HUNGRY_BANDIT = ("1304-gamedata.base", "Hungry bandit")
+HUNGRY_LEADER = ("1303-gamedata.base", "Hungry bandit leader")
+DUST_SQUAD = ("1302-gamedata.base", "Dust Bandit squad")
+DUST_BANDIT = ("510-gamedata.base", "Dust bandit")
+DUST_BOSS = ("1301-gamedata.base", "Dust bandit boss")
+ROAMING_AI = b"5201-gamedata.base"
 TORCH_POST = ("5437-new_furniture_otto.mod", "Torch Post")
 SIGNS_MATERIAL = ("973-gamedata.base", "signs")
 THRONE_USE = ("57289-rebirth.mod", "throne chair")  # BuildingFunctionality, BF_THRONE
@@ -98,6 +110,26 @@ def main():
     building.set("str", "building category", "EXTERIOR")
     building.set("str", "Description", "Bow here to leave. Kenshi Rogue.")
     assert building.sid == kmod._b("6-KenshiRogue.mod"), building.sid
+
+    # The encounter pool past fight 1: (base squad, leader, (member, count) or None, name).
+    dust = base(db, DUST_SQUAD)
+    pool = [
+        (mob, base(db, HUNGRY_LEADER), None, "Kenshi Rogue: a hungry bandit leader"),
+        (dust, base(db, DUST_BANDIT), None, "Kenshi Rogue: a dust bandit"),
+        (mob, bandit, (bandit, 2), "Kenshi Rogue: three starving bandits"),
+        (dust, base(db, DUST_BANDIT), (base(db, DUST_BANDIT), 1), "Kenshi Rogue: two dust bandits"),
+        (dust, base(db, DUST_BOSS), None, "Kenshi Rogue: a dust bandit boss"),
+        (dust, base(db, DUST_BOSS), (base(db, DUST_BANDIT), 1), "Kenshi Rogue: a dust bandit boss and his second"),
+    ]
+    for number, (squad_base, leader, members, name) in enumerate(pool, 7):
+        rec = new(squad_base, name)
+        rec.refs[b"leader"] = [(leader.sid, 1, 0, 0)]
+        if members:
+            rec.refs[b"squad"] = [(members[0].sid, members[1], members[1], 0)]
+        else:
+            rec.refs.pop(b"squad", None)
+        rec.refs[b"AI packages"] = [(ROAMING_AI, 0, 0, 0)]
+        assert rec.sid == kmod._b("%d-KenshiRogue.mod" % number), rec.sid
 
     for name in ANKH_FILES:
         src = os.path.join(KENSHI_TOWN_ANKH, name)
