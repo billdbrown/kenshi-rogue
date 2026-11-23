@@ -1,14 +1,15 @@
-# A whole run, unattended: seven rows. Fight 1 is the starving bandit; then
-# each row takes a fight (or a rest when offered, every other row), bows at
-# the ankh after each node, and stops if the run is lost. Speed 3.
+# A whole run on the map, unattended, with the runner's stats after every
+# node: how much a runner grows per row, to tune the later rows against.
 load kr-test
 wait_ready
 speed 3
+autofight on
 run_start
+stats
 wait_fight 240
 stop_if_lost
+stats
 loot
-ankh
 worship
 wait 6
 # row 1
@@ -17,6 +18,7 @@ go fight
 wait 3
 wait_fight 300
 runner
+stats
 stop_if_lost
 loot
 ankh
@@ -24,10 +26,11 @@ worship
 wait 6
 # row 2
 path
-go rest
+go fight
 wait 3
 wait_fight 300
 runner
+stats
 stop_if_lost
 loot
 ankh
@@ -39,6 +42,7 @@ go fight
 wait 3
 wait_fight 300
 runner
+stats
 stop_if_lost
 loot
 ankh
@@ -46,10 +50,11 @@ worship
 wait 6
 # row 4
 path
-go rest
+go fight
 wait 3
 wait_fight 300
 runner
+stats
 stop_if_lost
 loot
 ankh
@@ -61,6 +66,7 @@ go fight
 wait 3
 wait_fight 300
 runner
+stats
 stop_if_lost
 loot
 ankh
@@ -68,10 +74,11 @@ worship
 wait 6
 # row 6
 path
-go rest
+go fight
 wait 3
 wait_fight 300
 runner
+stats
 stop_if_lost
 loot
 ankh

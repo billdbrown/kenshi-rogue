@@ -1,0 +1,30 @@
+# Balance, part 2: what a runner needs. Each encounter past the first two,
+# four bouts each with the runner's fighting stats at 15, 20 and 25 (Katana).
+# A fresh runner (10s) wins only the first two (balance.txt).
+load kr-test
+wait_ready
+speed 3
+run_start
+wait 2
+runner_stats 15
+trials 2 4 120
+trials 3 4 120
+trials 4 4 120
+trials 5 4 120
+trials 6 4 120
+trials 7 4 120
+runner_stats 20
+trials 2 4 120
+trials 3 4 120
+trials 4 4 120
+trials 5 4 120
+trials 6 4 120
+trials 7 4 120
+runner_stats 25
+trials 2 4 120
+trials 3 4 120
+trials 4 4 120
+trials 5 4 120
+trials 6 4 120
+trials 7 4 120
+quit

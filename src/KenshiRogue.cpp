@@ -40,6 +40,7 @@
 #include <mygui/MyGUI_Gui.h>
 #include <mygui/MyGUI_Button.h>
 #include <mygui/MyGUI_Window.h>
+#include <mygui/MyGUI_TextBox.h>
 #include <mygui/MyGUI_Delegate.h>
 #include <ogre/OgreRoot.h>
 #include <ogre/OgreRenderSystem.h>
@@ -50,6 +51,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 
+#include <algorithm>
 #include <map>
 #include <sstream>
 #include <string>
@@ -65,8 +67,8 @@ namespace
     const char* RUNNER_TEMPLATE = "2205-gamedata.base";  // Drifter
     const char* RUNNER_NAME = "Runner";
 
-    // Starting weapon: a Horse Chopper, Rusted Junk grade.
-    const char* START_WEAPON = "475-gamedata.base";      // Horse Chopper
+    // Starting weapon: a Katana, Rusted Junk grade.
+    const char* START_WEAPON = "476-gamedata.base";      // Katana: 6/6 against each of the first two encounters (the Horse Chopper, 4/6 and 3/6, cost 5 Attack at Strength 10)
     const char* GRADE_MAKER = "912-gamedata.base";       // "Unknown" maker, the one with Rusted Junk
     const char* GRADE_RUSTED_JUNK = "913-gamedata.base"; // MaterialSpecsWeapon "Rusted Junk"
     const char* FIRST_AID = "209-gamedata.base";         // Basic First Aid Kit
@@ -88,6 +90,7 @@ namespace
     const float ARENA_OFFSET_M = 0.0f;       // the arena is where your first character stands (they stand aside)
     const float STAND_ASIDE_M = 200.0f;      // your own characters move this far west for the run
     const float SPAWN_DISTANCE_M = 6.0f;     // enemies appear this far from the runner (25 m put them up a cliff)
+    const float FLED_M = 40.0f;              // an enemy this far from the arena is put back
     const float ARENA_RADIUS_M = 150.0f;     // anyone not the run's inside this is removed while a run is on
 
     // The runner's fixed stats (everything else stays at the template's).
@@ -133,6 +136,8 @@ namespace
 
     int g_frame = 0;
     bool g_atActive = false; // a harness scenario is running (see Autotest, below)
+    float g_statOverride = 0.0f; // the harness's `runner_stats <n>`: the 10s of the runner's sheet become n
+    bool g_autofight = false; // the harness's `autofight on`: runners attack too, as a player would order
     // Game time: what the ankh's timer counts, so pausing to loot doesn't eat
     // it and 5x makes it pass 5x as fast. The harness's `clock` checks.
     double g_gameClock = 0.0;
@@ -244,15 +249,23 @@ namespace
     };
     const char* STARVING = "1305-gamedata.base"; // Starving Bandits
     const char* DUST = "200-gamedata.base";      // Dust Bandits
+    // Rows by measured difficulty (balance.txt, 2026-11-23: six bouts each
+    // against a fresh runner with a Katana): a starving bandit 6/6, a hungry
+    // bandit leader 6/6, two starving bandits 1/6, a dust bandit 0/6, three
+    // starving bandits, two dust bandits and the boss 0/6. A fresh runner
+    // wins only the first two; the later rows count on the runner having
+    // grown by fighting (the first full run beat three starving bandits at
+    // row 3) and on boons. One-on-one fights last longer; the boss with a
+    // second is the last row only.
     const Node ENCOUNTERS[] = {
-        {NODE_FIGHT, SQUAD_ONE_BANDIT, STARVING, 1, 1, 0, 0, "a starving bandit"},
+        {NODE_FIGHT, SQUAD_ONE_BANDIT, STARVING, 1, 1, 0, 1, "a starving bandit"},
         {NODE_FIGHT, "7-KenshiRogue.mod", STARVING, 1, 1, 1, 2, "a hungry bandit leader"},
-        {NODE_FIGHT, "8-KenshiRogue.mod", DUST, 0, 1, 1, 3, "a dust bandit"},
-        {NODE_FIGHT, SQUAD_TWO_BANDITS, STARVING, 0, 2, 2, 4, "two starving bandits"},
-        {NODE_FIGHT, "9-KenshiRogue.mod", STARVING, 0, 3, 3, 5, "three starving bandits"},
-        {NODE_FIGHT, "10-KenshiRogue.mod", DUST, 0, 2, 4, 5, "two dust bandits"},
-        {NODE_ELITE, "11-KenshiRogue.mod", DUST, 2, 1, 3, 6, "a dust bandit boss"},
-        {NODE_ELITE, "12-KenshiRogue.mod", DUST, 2, 2, 5, 6, "a dust bandit boss and his second"},
+        {NODE_FIGHT, SQUAD_TWO_BANDITS, STARVING, 0, 2, 2, 3, "two starving bandits"},
+        {NODE_FIGHT, "8-KenshiRogue.mod", DUST, 0, 1, 2, 4, "a dust bandit"},
+        {NODE_FIGHT, "9-KenshiRogue.mod", STARVING, 0, 3, 4, 5, "three starving bandits"},
+        {NODE_FIGHT, "10-KenshiRogue.mod", DUST, 0, 2, 5, 5, "two dust bandits"},
+        {NODE_ELITE, "11-KenshiRogue.mod", DUST, 2, 1, 4, 6, "a dust bandit boss"},
+        {NODE_ELITE, "12-KenshiRogue.mod", DUST, 2, 2, 6, 6, "a dust bandit boss and his second"},
     };
     const int ENCOUNTER_COUNT = sizeof(ENCOUNTERS) / sizeof(ENCOUNTERS[0]);
     const Node REST_NODE = {NODE_REST, NULL, NULL, 0, 0, 1, 5, "rest"};
@@ -396,7 +409,8 @@ namespace
         c->setName(RUNNER_NAME);
         if (CharStats* st = c->getStats())
             for (size_t i = 0; i < sizeof(RUNNER_STATS) / sizeof(RUNNER_STATS[0]); ++i)
-                st->getStatRef(RUNNER_STATS[i].stat) = RUNNER_STATS[i].value;
+                st->getStatRef(RUNNER_STATS[i].stat) =
+                    g_statOverride > 0.0f && RUNNER_STATS[i].value >= 10.0f ? g_statOverride : RUNNER_STATS[i].value;
         std::ostringstream note;
         note << "runner: template's " << stripItems(c) << " items removed";
         logLine(note.str());
@@ -507,20 +521,51 @@ namespace
 
     // ---- The ankh: bow at it to leave a node --------------------------------
 
+    // Ankhs are destroyed a second after they're removed, never in the frame
+    // they were made: trials at speed 3 made one and removed it in the same
+    // frame, and Kenshi crashed (2026-11-23).
+    struct Grave
+    {
+        Building* b;
+        int frame;
+    };
+    std::vector<Grave> g_ankhGraves;
+    bool g_trialsRunning = false; // trials raise no ankhs and pay no cats
+
     void removeAnkh()
     {
         if (g_run.ankh)
-            ou->dynamicDestroyBuilding(hand(g_run.ankh));
+        {
+            Grave g = {g_run.ankh, g_frame};
+            g_ankhGraves.push_back(g);
+        }
         g_run.ankh = NULL;
         g_run.bowSince = 0;
+    }
+
+    void buryAnkhs()
+    {
+        for (size_t i = 0; i < g_ankhGraves.size();)
+            if (g_frame - g_ankhGraves[i].frame > 60)
+            {
+                ou->dynamicDestroyBuilding(hand(g_ankhGraves[i].b));
+                g_ankhGraves.erase(g_ankhGraves.begin() + i);
+            }
+            else
+                ++i;
     }
 
     // Beside the runner, or beside the given spot: a teleport takes a frame to land, so
     // in a shop the runner's position is still the arena's (shop test,
     // 2026-11-23: the ankh went up 683 m from the runner).
+    Ogre::Vector3 g_ankhRetryAt;
+    int g_ankhRetries = 0;
+
     void spawnAnkh(const Ogre::Vector3* beside)
     {
         removeAnkh();
+        if (g_trialsRunning)
+            return;
         GameData* d = data(ANKH);
         g_run.ankhUntil = g_gameClock + AFTER_NODE_SECONDS;
         if (!d || !g_createBuilding || g_run.runners.empty())
@@ -543,11 +588,44 @@ namespace
             logLine(o.str());
         }
         else
+        {
             logLine("ankh: createBuilding returned nothing");
+            if (beside)
+            {
+                g_ankhRetryAt = *beside; // a far town's ground may not be loaded yet: retry
+                g_ankhRetries = 30;
+            }
+        }
+    }
+
+    // A shop in a far town: the teleport lands before Kenshi has loaded the
+    // ground, and the ankh can't be built (Squin, 2026-11-23). Try once a
+    // second for 30 s.
+    void retryAnkh()
+    {
+        if (g_ankhRetries <= 0 || g_run.ankh || g_run.state != RUN_BETWEEN || g_frame % 60 != 0)
+            return;
+        --g_ankhRetries;
+        GameData* d = data(ANKH);
+        Ogre::Vector3 pos(g_ankhRetryAt.x, 0.0f, g_ankhRetryAt.z + ANKH_DISTANCE_M * METRE);
+        g_run.ankh = d && g_createBuilding
+                         ? g_createBuilding(ou->theFactory, d, pos, NULL, ou->player->getFaction(),
+                                            Ogre::Quaternion::IDENTITY, NULL, NULL, NULL, NULL, NULL, false, true,
+                                            false, 0, false)
+                         : NULL;
+        if (g_run.ankh)
+        {
+            logLine("ankh: up on retry, " + toStr(float(30 - g_ankhRetries)) + " s after arriving");
+            g_ankhRetries = 0;
+        }
+        else if (g_ankhRetries == 0)
+            logLine("ankh: never made here; the timer will move you on");
     }
 
     void payCats()
     {
+        if (g_trialsRunning)
+            return;
         // More the deeper the row, and double for an elite.
         int cats = (CATS_MIN + rand() % (CATS_MAX - CATS_MIN + 1)) * (g_run.node + 1) *
                    (g_run.current.kind == NODE_ELITE ? 2 : 1);
@@ -748,12 +826,146 @@ namespace
         startFight(n);
     }
 
-    // ---- The path: the next row's choices -----------------------------------
+    // ---- The map: the whole run, drawn; you choose a linked node each row ----
+    //
+    // Bill, 2026-11-23: "build the full node map". Slay the Spire's shape: a
+    // run is RUN_ROWS columns of nodes; each node links to one or two in the
+    // next column, and you can only go where your node links. Column 0 is the
+    // starving bandit, the last column the elite at the end.
+
+    struct MapNode
+    {
+        Node node;
+        std::vector<int> next; // indices in the next column
+        bool visited;
+    };
+    std::vector<std::vector<MapNode> > g_map;
+    int g_mapCol = 0;               // the current node's index in its column
+    std::vector<int> g_choiceCols;  // the offered nodes' indices, parallel to g_run.choices
+
+    Node mapPick(int row)
+    {
+        std::vector<Node> fights, elites;
+        for (int i = 0; i < ENCOUNTER_COUNT; ++i)
+            if (ENCOUNTERS[i].minRow <= row && row <= ENCOUNTERS[i].maxRow)
+                (ENCOUNTERS[i].kind == NODE_ELITE ? elites : fights).push_back(ENCOUNTERS[i]);
+        if (row == RUN_ROWS - 1 && !elites.empty())
+            return elites[size_t(rand()) % elites.size()];
+        int k = rand() % 100;
+        if (row >= 3 && k < 15 && !elites.empty())
+            return elites[size_t(rand()) % elites.size()];
+        if (row >= 2 && row <= RUN_ROWS - 2 && k < 28)
+        {
+            Node shop = {NODE_SHOP, NULL, NULL, 0, 0, 2, RUN_ROWS - 2, SHOP_TOWNS[rand() % SHOP_TOWN_COUNT]};
+            return shop;
+        }
+        if (row >= 2 && k < 42)
+            return REST_NODE;
+        return fights.empty() ? ENCOUNTERS[0] : fights[size_t(rand()) % fights.size()];
+    }
+
+    void generateMap()
+    {
+        g_map.clear();
+        g_map.resize(RUN_ROWS);
+        for (int r = 0; r < RUN_ROWS; ++r)
+        {
+            int width = (r == 0 || r == RUN_ROWS - 1) ? 1 : 2 + rand() % 2;
+            for (int c = 0; c < width; ++c)
+            {
+                MapNode m;
+                m.node = r == 0 ? ENCOUNTERS[0] : mapPick(r);
+                m.visited = false;
+                g_map[r].push_back(m);
+            }
+        }
+        // Links: each node to the nearest in the next column, sometimes a
+        // neighbour too; then every node gets at least one way in.
+        for (int r = 0; r + 1 < RUN_ROWS; ++r)
+        {
+            int w = int(g_map[r].size()), w2 = int(g_map[r + 1].size());
+            std::vector<bool> reached(w2, false);
+            for (int c = 0; c < w; ++c)
+            {
+                int t = int((float(c) + 0.5f) / float(w) * float(w2));
+                if (t >= w2)
+                    t = w2 - 1;
+                g_map[r][c].next.push_back(t);
+                reached[t] = true;
+                int other = rand() % 2 ? t + 1 : t - 1;
+                if (rand() % 2 && other >= 0 && other < w2)
+                {
+                    g_map[r][c].next.push_back(other);
+                    reached[other] = true;
+                }
+            }
+            for (int c2 = 0; c2 < w2; ++c2)
+                if (!reached[c2])
+                {
+                    int from = int((float(c2) + 0.5f) / float(w2) * float(w));
+                    if (from >= w)
+                        from = w - 1;
+                    g_map[r][from].next.push_back(c2);
+                }
+            for (int c = 0; c < w; ++c)
+            {
+                std::vector<int>& n = g_map[r][c].next;
+                std::sort(n.begin(), n.end());
+                n.erase(std::unique(n.begin(), n.end()), n.end());
+            }
+        }
+        std::ostringstream o;
+        o << "map:";
+        for (int r = 0; r < RUN_ROWS; ++r)
+        {
+            o << " |";
+            for (size_t c = 0; c < g_map[r].size(); ++c)
+            {
+                o << " " << nodeLabel(g_map[r][c].node) << " ->";
+                for (size_t k = 0; k < g_map[r][c].next.size(); ++k)
+                    o << " " << g_map[r][c].next[k];
+                o << ";";
+            }
+        }
+        logLine(o.str());
+        g_mapCol = 0;
+    }
+
+    void showMap(bool choosing);
+    void goPath(size_t i);
+    void offerPathFallback();
+
+    // The next row's choices: wherever the current node links.
+    void offerPath()
+    {
+        int row = g_run.node;
+        g_run.choices.clear();
+        g_choiceCols.clear();
+        if (row > 0 && row < int(g_map.size()) && g_mapCol < int(g_map[row - 1].size()))
+        {
+            const std::vector<int>& next = g_map[row - 1][g_mapCol].next;
+            for (size_t i = 0; i < next.size(); ++i)
+            {
+                g_run.choices.push_back(g_map[row][next[i]].node);
+                g_choiceCols.push_back(next[i]);
+            }
+        }
+        if (g_run.choices.empty()) // no map (shouldn't happen): the old offer
+            offerPathFallback();
+        g_run.state = RUN_PATHING;
+        std::ostringstream o;
+        o << "row " << row << " of " << RUN_ROWS - 1 << ", offered:";
+        for (size_t i = 0; i < g_run.choices.size(); ++i)
+            o << " [" << i << "] " << nodeLabel(g_run.choices[i]) << ";";
+        logLine(o.str());
+        showMap(true);
+    }
+
+    // ---- The old path offer, kept as the fallback -----------------------------
 
     void showChoices(const char* title, const std::vector<std::string>& labels, void (*pick)(size_t));
-    void goPath(size_t i);
 
-    void offerPath()
+    void offerPathFallback()
     {
         int row = g_run.node;
         std::vector<Node> fights, elites;
@@ -788,19 +1000,7 @@ namespace
         if (offer.empty())
             offer.push_back(ENCOUNTERS[0]);
         g_run.choices = offer;
-        g_run.state = RUN_PATHING;
-        std::vector<std::string> labels;
-        std::ostringstream o;
-        o << "row " << row << " of " << RUN_ROWS - 1 << ", offered:";
-        for (size_t i = 0; i < offer.size(); ++i)
-        {
-            labels.push_back(nodeLabel(offer[i]));
-            o << " [" << i << "] " << labels.back() << ";";
-        }
-        logLine(o.str());
-        std::ostringstream title;
-        title << "Choose your path (" << row << " of " << RUN_ROWS - 1 << ")";
-        showChoices(title.str().c_str(), labels, goPath);
+        g_choiceCols.assign(offer.size(), -1);
     }
 
     // Moves the run on: start it, or play the next node.
@@ -844,6 +1044,9 @@ namespace
         g_run.node = next;
         if (next == 0)
         {
+            g_mapCol = 0;
+            if (!g_map.empty() && !g_map[0].empty())
+                g_map[0][0].visited = true;
             play(ENCOUNTERS[0]); // always the starving bandit
             return;
         }
@@ -970,6 +1173,133 @@ namespace
         g_choiceWindow = NULL;
     }
 
+    // ---- The map window -------------------------------------------------------
+
+    MyGUI::Window* g_mapWindow = NULL;
+    std::vector<MyGUI::Button*> g_mapButtons; // reachable nodes, in g_run.choices order
+
+    void closeMap()
+    {
+        if (g_mapWindow && MyGUI::Gui::getInstancePtr())
+            MyGUI::Gui::getInstancePtr()->destroyWidget(g_mapWindow);
+        g_mapWindow = NULL;
+        g_mapButtons.clear();
+    }
+
+    void onMapNode(MyGUI::WidgetPtr w)
+    {
+        for (size_t i = 0; i < g_mapButtons.size(); ++i)
+            if (g_mapButtons[i] == w)
+            {
+                goPath(i);
+                return;
+            }
+    }
+
+    void onMapClose(MyGUI::Window*, const std::string&)
+    {
+        closeMap(); // the HUD button brings it back
+    }
+
+    std::string mapCaption(const Node& n)
+    {
+        if (n.kind == NODE_REST)
+            return "Rest";
+        if (n.kind == NODE_SHOP)
+            return std::string("Shop: ") + n.label;
+        std::string l = n.label;
+        if (n.kind == NODE_ELITE) // short enough for a button
+            return l.find("second") != std::string::npos ? "Elite: boss + 1" : "Elite: boss";
+        if (l.compare(0, 2, "a ") == 0)
+            l = l.substr(2);
+        else if (l.compare(0, 4, "two ") == 0) // digits: "three starving bandits" clipped its button
+            l = "2 " + l.substr(4);
+        else if (l.compare(0, 6, "three ") == 0)
+            l = "3 " + l.substr(6);
+        if (!l.empty())
+            l[0] = char(toupper((unsigned char)l[0]));
+        return l;
+    }
+
+    // Columns left to right, one per row; a node's links to the next column
+    // drawn as dots. Visited nodes are marked; when choosing, only the nodes
+    // your current one links to are clickable.
+    void showMap(bool choosing)
+    {
+        closeMap();
+        MyGUI::Gui* gui = MyGUI::Gui::getInstancePtr();
+        if (!gui || g_map.empty())
+            return;
+        g_mapWindow = gui->createWidgetReal<MyGUI::Window>("Kenshi_WindowCX", 0.06f, 0.10f, 0.88f, 0.62f,
+                                                           MyGUI::Align::Default, "Window", "KenshiRogueMap");
+        std::ostringstream title;
+        title << (choosing ? "Choose your path" : "The road") << "  (row " << (g_run.node < 0 ? 0 : g_run.node)
+              << " of " << RUN_ROWS - 1 << ")";
+        g_mapWindow->setCaption(title.str());
+        g_mapWindow->eventWindowButtonPressed += MyGUI::newDelegate(onMapClose);
+        MyGUI::Widget* client = g_mapWindow->getClientWidget();
+        const float colW = 1.0f / float(RUN_ROWS), bw = colW * 0.86f, bh = 0.11f;
+        // Where a node's button sits (top-left), and its centre.
+        struct At
+        {
+            static float x(int r, float colW, float bw) { return float(r) * colW + (colW - bw) * 0.5f; }
+            static float y(int c, int w, float bh) { return 0.06f + (float(c) + 0.5f) / float(w) * 0.88f - bh * 0.5f; }
+        };
+        // Links first, so buttons draw over them.
+        for (int r = 0; r + 1 < int(g_map.size()); ++r)
+            for (int c = 0; c < int(g_map[r].size()); ++c)
+                for (size_t k = 0; k < g_map[r][c].next.size(); ++k)
+                {
+                    int c2 = g_map[r][c].next[k];
+                    float x0 = At::x(r, colW, bw) + bw, y0 = At::y(c, int(g_map[r].size()), bh) + bh * 0.5f;
+                    float x1 = At::x(r + 1, colW, bw), y1 = At::y(c2, int(g_map[r + 1].size()), bh) + bh * 0.5f;
+                    bool walked = g_map[r][c].visited && g_map[r + 1][c2].visited;
+                    bool open = choosing && r + 1 == g_run.node && c == g_mapCol;
+                    for (int d = 1; d < 9; ++d)
+                    {
+                        float f = float(d) / 9.0f;
+                        MyGUI::TextBox* dot = client->createWidgetReal<MyGUI::TextBox>(
+                            "Kenshi_TextboxStandardText", x0 + (x1 - x0) * f - 0.01f, y0 + (y1 - y0) * f - 0.02f,
+                            0.02f, 0.04f, MyGUI::Align::Default);
+                        dot->setCaption("o");
+                        dot->setTextAlign(MyGUI::Align::Center);
+                        dot->setNeedMouseFocus(false);
+                        dot->setTextColour(walked ? MyGUI::Colour(0.85f, 0.78f, 0.6f)
+                                           : open ? MyGUI::Colour(0.95f, 0.95f, 0.85f)
+                                                  : MyGUI::Colour(0.45f, 0.42f, 0.38f));
+                    }
+                }
+        g_mapButtons.assign(g_run.choices.size(), (MyGUI::Button*)NULL);
+        for (int r = 0; r < int(g_map.size()); ++r)
+            for (int c = 0; c < int(g_map[r].size()); ++c)
+            {
+                const MapNode& m = g_map[r][c];
+                MyGUI::Button* b = client->createWidgetReal<MyGUI::Button>(
+                    "Kenshi_Button1", At::x(r, colW, bw), At::y(c, int(g_map[r].size()), bh), bw, bh,
+                    MyGUI::Align::Default);
+                bool here = r == g_run.node - (choosing ? 1 : 0) && c == g_mapCol && m.visited;
+                b->setCaption((here ? "> " : m.visited ? "+ " : "") + mapCaption(m.node));
+                int choice = -1;
+                if (choosing && r == g_run.node)
+                    for (size_t i = 0; i < g_choiceCols.size(); ++i)
+                        if (g_choiceCols[i] == c)
+                            choice = int(i);
+                // Colour, not setEnabled: Kenshi's skin draws a disabled button
+                // brighter than an enabled one (first map screenshots).
+                b->setTextColour(choice >= 0  ? MyGUI::Colour(1.0f, 0.85f, 0.45f)
+                                 : here       ? MyGUI::Colour(0.95f, 0.95f, 0.95f)
+                                 : m.visited  ? MyGUI::Colour(0.6f, 0.75f, 0.55f)
+                                              : MyGUI::Colour(0.5f, 0.47f, 0.42f));
+                if (choice < 0)
+                    b->setNeedMouseFocus(false);
+                if (choice >= 0)
+                {
+                    g_mapButtons[size_t(choice)] = b;
+                    b->eventMouseButtonClick += MyGUI::newDelegate(onMapNode);
+                }
+            }
+    }
+
     void showChoices(const char* title, const std::vector<std::string>& labels, void (*pick)(size_t))
     {
         g_choiceTitle = title;
@@ -1024,11 +1354,19 @@ namespace
         advance();
     }
 
+    void closeMap();
+
     void goPath(size_t i)
     {
         if (g_run.state != RUN_PATHING || i >= g_run.choices.size())
             return;
         closeChoices();
+        closeMap();
+        if (i < g_choiceCols.size() && g_choiceCols[i] >= 0 && g_run.node < int(g_map.size()))
+        {
+            g_mapCol = g_choiceCols[i];
+            g_map[g_run.node][g_mapCol].visited = true;
+        }
         Node n = g_run.choices[i];
         g_run.choices.clear();
         play(n);
@@ -1072,6 +1410,7 @@ namespace
         o << "run started: arena at " << int(g_run.arena.x) << "," << int(g_run.arena.z) << "; " << health(r);
         logLine(o.str());
         ou->player->focusCamera(g_run.arena);
+        generateMap();
         if (!g_atActive || g_atBoons)
         {
             offerBoons(); // fight 1 starts when one is chosen
@@ -1127,9 +1466,18 @@ namespace
         if (GetTickCount() - lastOrder > 10000 && !g_run.runners.empty() && !out(g_run.runners[0]))
         {
             lastOrder = GetTickCount();
+            Character* target = NULL;
             for (size_t i = 0; i < g_run.enemies.size(); ++i)
                 if (!out(g_run.enemies[i]))
+                {
                     g_run.enemies[i]->attackTarget(g_run.runners[0]);
+                    if (!target)
+                        target = g_run.enemies[i];
+                }
+            if (g_autofight && target)
+                for (size_t i = 0; i < g_run.runners.size(); ++i)
+                    if (!out(g_run.runners[i]))
+                        g_run.runners[i]->attackTarget(target);
         }
         const Node& n = g_run.current;
         DWORD since = GetTickCount() - g_run.fightStart;
@@ -1148,9 +1496,39 @@ namespace
                 return;
             }
         }
+        // A log line every 30 s: where everyone is (a crash came 100 s into a
+        // stalled fight, 2026-11-23, with nothing in the log to say why).
+        static DWORD lastBeat = 0;
+        if (GetTickCount() - lastBeat > 30000 && since > 25000)
+        {
+            lastBeat = GetTickCount();
+            std::ostringstream b;
+            b << "fight, " << since / 1000 << " s in: runner "
+              << (g_run.runners.empty() ? std::string("-") : health(g_run.runners[0]).substr(0, 4));
+            for (size_t i = 0; i < g_run.enemies.size(); ++i)
+                if (g_run.enemies[i])
+                    b << "; enemy " << i << " " << (out(g_run.enemies[i]) ? "out" : "up") << " "
+                      << int(g_run.enemies[i]->getPosition().distance(g_run.spawnAt) / METRE) << " m from its spawn";
+            logLine(b.str());
+        }
+        // Enemies on a leash: one that wanders past FLED_M from the arena is
+        // put back by its spawn and told to attack again. Bandits walk off
+        // (a fight stalled for 300 s; counting them as fled instead made
+        // rows 1 and 2 free wins in 13 s each, 2026-11-23).
         bool enemiesOut = true, runnersOut = true;
         for (size_t i = 0; i < g_run.enemies.size(); ++i)
-            enemiesOut = enemiesOut && out(g_run.enemies[i]);
+        {
+            Character* e = g_run.enemies[i];
+            if (e && !out(e) && g_frame % 60 == 0 && e->getPosition().distance(g_run.arena) > FLED_M * METRE &&
+                !g_run.runners.empty())
+            {
+                logLine("enemy " + toStr(float(i)) + " wandered " +
+                        toStr(float(int(e->getPosition().distance(g_run.arena) / METRE))) + " m off; put back");
+                park(e, g_run.spawnAt);
+                e->attackTarget(g_run.runners[0]);
+            }
+            enemiesOut = enemiesOut && out(e);
+        }
         for (size_t i = 0; i < g_run.runners.size(); ++i)
             runnersOut = runnersOut && out(g_run.runners[i]);
         if (!enemiesOut && !runnersOut)
@@ -1214,10 +1592,14 @@ namespace
             runStart(ARENA_OFFSET_M, 0.0f);
         else if (g_run.state == RUN_FIGHTING && !g_run.runners.empty())
             ou->player->focusCamera(g_run.runners[0]->getPosition());
-        else if (g_run.state == RUN_CHOOSING || g_run.state == RUN_PATHING)
+        else if (g_run.state == RUN_CHOOSING)
             showChoices(g_choiceTitle.c_str(), g_choiceLabels, g_choicePick); // closed by mistake: back again
+        else if (g_run.state == RUN_PATHING)
+            showMap(true);
+        else if (g_mapWindow)
+            closeMap();
         else
-            advance();
+            showMap(false); // a look at the road; the ankh is still how you move on
     }
 
     void updateHud()
@@ -1561,13 +1943,12 @@ namespace
             Node shop = {NODE_SHOP, NULL, NULL, 0, 0, 0, RUN_ROWS, town.c_str()};
             if (g_run.state == RUN_PATHING)
             {
-                if (g_run.choices.size() >= 3)
-                    g_run.choices.pop_back();
-                g_run.choices.push_back(shop);
-                std::vector<std::string> labels;
-                for (size_t i = 0; i < g_run.choices.size(); ++i)
-                    labels.push_back(nodeLabel(g_run.choices[i]));
-                showChoices(g_choiceTitle.c_str(), labels, goPath);
+                // The last offered node becomes the shop, on the map too.
+                size_t last = g_run.choices.size() - 1;
+                g_run.choices[last] = shop;
+                if (last < g_choiceCols.size() && g_choiceCols[last] >= 0)
+                    g_map[g_run.node][g_choiceCols[last]].node = shop;
+                showMap(true);
             }
             atCheck(g_run.state == RUN_PATHING && findTown(town) != NULL, "shop on offer: " + town);
             return true;
@@ -1618,6 +1999,24 @@ namespace
                         o << " " << i->first << " (" << i->second << ");";
             }
             atWrite("INFO", o.str());
+            return true;
+        }
+        if (cmd == "runner_stats") // runner_stats <n>: runners made from now on have n where the sheet has 10 (0: the sheet)
+        {
+            g_statOverride = float(atof(rest.c_str()));
+            atWrite("INFO", "runner stats " + (g_statOverride > 0.0f ? toStr(g_statOverride) : std::string("as the sheet")));
+            return true;
+        }
+        if (cmd == "autofight") // autofight on|off: runners are ordered to attack, as a player would
+        {
+            g_autofight = rest != "off";
+            atWrite("INFO", std::string("autofight ") + (g_autofight ? "on" : "off"));
+            return true;
+        }
+        if (cmd == "map") // map: show the map window (view only unless choosing)
+        {
+            showMap(g_run.state == RUN_PATHING);
+            atWrite("INFO", g_mapWindow ? "map shown" : "map: none");
             return true;
         }
         if (cmd == "path") // path: the choices on offer
@@ -1671,6 +2070,7 @@ namespace
                 times.clear();
                 running = true;
                 inBout = false;
+                g_trialsRunning = true;
             }
             if (inBout)
             {
@@ -1702,6 +2102,7 @@ namespace
             if (left <= 0)
             {
                 running = false;
+                g_trialsRunning = false;
                 std::ostringstream o;
                 o << "trials of " << ENCOUNTERS[node].label << " with " << g_startWeapon << ": " << won << " won, " << lost
                   << " lost, " << undecided << " undecided (secs and result:" << times << ")";
@@ -2034,6 +2435,8 @@ namespace
                 g_hud->setVisible(false);
             return;
         }
+        buryAnkhs();
+        retryAnkh();
         keepParking();
         keepInTown();
         holdWounds();

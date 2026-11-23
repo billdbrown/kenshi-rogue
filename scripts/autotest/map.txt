@@ -1,0 +1,32 @@
+# The node map: generated at run start; after a node and its ankh, it opens
+# with only the linked nodes clickable. Screenshots at row 1 and row 2, and a
+# view-only look between nodes.
+load kr-test
+wait_ready
+speed 2
+autofight on
+run_start
+wait 2
+map
+wait 1
+screenshot map-start
+map
+wait_fight 240
+loot
+worship
+wait 6
+screenshot map-row1
+path
+go 0
+wait 3
+wait_fight 300
+stop_if_lost
+map
+wait 1
+screenshot map-view-between
+map
+worship
+wait 6
+screenshot map-row2
+path
+quit
