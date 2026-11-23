@@ -55,8 +55,11 @@ plays it unattended.
 
 ## Open questions
 
-- Does RE_Kenshi load a plugin only when its mod is enabled? Kenshi Rogue and Kenshi Town share
-  one Kenshi install, so each harness run needs a mod profile that loads only its own mod.
+- ~~Does RE_Kenshi load a plugin only when its mod is enabled?~~ **Yes** (checked 2026-11-23):
+  with KenshiRogue installed but not in `data/mods.cfg`, only TownLedger's plugin loaded, and
+  KenshiCoop, installed and disabled, didn't load either. Listed in `mods.cfg`, KenshiRogue loaded
+  beside TownLedger. So a harness run picks its mods by writing `mods.cfg`, then puts the
+  player's list back.
 - Where the arenas are.
 - Does fight AI behave in an empty arena (fleeing, kiting, getting stuck)?
 - Later: runs as expeditions from a Kenshi Town settlement. Keep the two standalone until both
