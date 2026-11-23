@@ -1,16 +1,27 @@
 # The first slice, unattended: runner, fight 1, loot, rest, fight 2.
-# Fights play themselves: the runner defends itself.
+# Fights play themselves: the runner defends itself. kr-test is a Wanderer
+# game on flat ground, made for this (Bill, 2026-11-23); the runner appears
+# where its character stood, and that character is moved 200 m aside.
 load kr-test
 wait_ready
 run_start
 wait 3
+people
 expect state fighting
 expect enemies 1
 enemies
 runner
+select_runner
+wait 1
+medraw
 screenshot fight1-start
 wait_fight 240
+people
+enemies
+select_runner
+wait 1
 screenshot fight1-end
+medraw
 enemies
 runner
 expect fights_won 1
@@ -18,8 +29,14 @@ loot
 runner
 expect carrying Basic First Aid Kit
 wound 40
+wait 1
+medraw
+screenshot wounded
 next
+wait 1
 runner
+medraw
+screenshot rested
 expect state between
 next
 wait 3
@@ -27,8 +44,11 @@ expect state fighting
 expect enemies 2
 enemies
 wait_fight 300
+select_runner
+wait 1
 screenshot fight2-end
 runner
+medraw
 strangers
 expect fights_won 2
 next

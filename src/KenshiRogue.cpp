@@ -27,6 +27,7 @@
 #include <kenshi/CharStats.h>
 #include <kenshi/Inventory.h>
 #include <kenshi/MedicalSystem.h>
+#include <kenshi/CharMovement.h>
 #include <kenshi/SaveManager.h>
 #include <kenshi/Enums.h>
 #include <kenshi/util/hand.h>
@@ -66,9 +67,10 @@ namespace
     const char* FIRST_AID = "209-gamedata.base";         // Basic First Aid Kit
 
     const float METRE = 10.0f;               // world units per metre
-    const float ARENA_OFFSET_M = 5.0f;       // the runner appears this far east of your first character
-    const float SPAWN_DISTANCE_M = 25.0f;    // enemies appear this far from the runner
-    const float ARENA_RADIUS_M = 120.0f;     // strangers inside this during a fight are removed
+    const float ARENA_OFFSET_M = 0.0f;       // the arena is where your first character stands (they stand aside)
+    const float STAND_ASIDE_M = 200.0f;      // your own characters move this far west for the run
+    const float SPAWN_DISTANCE_M = 6.0f;     // enemies appear this far from the runner (25 m put them up a cliff)
+    const float ARENA_RADIUS_M = 150.0f;     // anyone not the run's inside this is removed while a run is on
 
     // The runner's fixed stats (everything else stays at the template's).
     struct FixedStat
@@ -114,28 +116,43 @@ namespace
         return ou && ou->player && ou->player->getAllPlayerCharacters().size() > 0;
     }
 
+    // Halt, then teleport to an exact spot: KenshiCoop's `park`, proven there.
+    bool park(Character* c, const Ogre::Vector3& to)
+    {
+        CharMovement* mv = c ? c->movement : NULL;
+        if (!mv)
+            return false;
+        mv->halt();
+        mv->_setPositionDirectionAndTeleport(to, Ogre::Quaternion::IDENTITY);
+        return true;
+    }
+
+    typedef hand* (__fastcall* HandCtorFn)(hand* self, unsigned int index, unsigned int serial, itemType type,
+                                           unsigned int container, unsigned int containerSerial);
+    HandCtorFn g_handCtor = NULL;
+
+    // Items: createItem(template, blank hand, NULL, NULL, -1). Weapons are
+    // different, as KenshiCoop found (its "spike 451"): the maker goes first,
+    // the hand is built as NULL_ITEM, the weapon template third, the grade
+    // fourth, level 0. Template-first returns null for every weapon (our first
+    // three runs, 2026-11-23).
     Item* makeItem(GameData* d, GameData* maker, GameData* grade)
     {
         if (!d || !g_createItem || !ou->theFactory)
             return NULL;
-        // Which of createItem's two GameData arguments takes the maker and
-        // which the grade isn't documented; try both, then neither, and say
-        // which worked (the first run, 2026-11-23, made nothing).
-        hand none;
-        Item* it = g_createItem(ou->theFactory, d, &none, maker, grade, -1, NULL);
-        const char* how = "maker, grade";
-        if (!it && (maker || grade))
+        if (!maker)
         {
-            it = g_createItem(ou->theFactory, d, &none, grade, maker, -1, NULL);
-            how = "grade, maker";
+            hand none;
+            return g_createItem(ou->theFactory, d, &none, NULL, NULL, -1, NULL);
         }
-        if (!it && (maker || grade))
-        {
-            it = g_createItem(ou->theFactory, d, &none, NULL, NULL, -1, NULL);
-            how = "no grade";
-        }
-        if (maker || grade)
-            logLine(std::string("makeItem ") + d->name + ": " + (it ? it->getName() + " (" + how + ")" : "NOTHING"));
+        if (!g_handCtor)
+            return NULL;
+        char buf[sizeof(hand) + 16];
+        memset(buf, 0, sizeof(buf));
+        hand* h = reinterpret_cast<hand*>(buf);
+        g_handCtor(h, 0, 0, NULL_ITEM, 0, 0);
+        Item* it = g_createItem(ou->theFactory, maker, h, d, grade, 0, NULL);
+        logLine(std::string("makeItem ") + d->name + ": " + (it ? it->getName() : std::string("NOTHING")));
         return it;
     }
 
@@ -190,7 +207,8 @@ namespace
         int node;                       // the node being played or just finished
         Ogre::Vector3 arena;
         std::vector<Character*> runners;
-        std::vector<Character*> enemies;
+        std::vector<Character*> enemies;    // the current (or last) fight's
+        std::vector<Character*> allEnemies; // every fight's, so far: the downed stay as bodies to loot
         DWORD fightStart;
         int fightsWon;
         int strangersRemoved;
@@ -221,7 +239,10 @@ namespace
         MedicalSystem* m = c->getMedical();
         if (!m)
             return o.str();
-        o << ", blood " << int(m->blood) << "/" << int(m->getMaxBlood()) << ";";
+        // Hunger too: starving bandits can collapse from it, which would
+        // look like a win (third run: fight 1 "won" with no fight seen).
+        o << ", blood " << int(m->blood) << "/" << int(m->getMaxBlood()) << ", hunger " << int(m->hunger)
+          << (m->isHungerKO() ? " (COLLAPSED FROM HUNGER)" : "") << ";";
         for (int i = 0; i < m->getPartCount(); ++i)
         {
             MedicalSystem::HealthPartStatus* p = m->getPart((unsigned __int64)i);
@@ -241,23 +262,26 @@ namespace
         return o.str();
     }
 
-    // Arena hygiene: anyone hostile who isn't in the fight is removed while
-    // it's on, so a passing patrol can't decide it (raids ended Kenshi Town
-    // tests the same way). The design's "world spawns off nearby", for now.
+    // No world spawns near a run (Bill, 2026-11-23, after a passing group of
+    // starving bandits walked through the second test): for the whole run,
+    // anyone near the arena who isn't the run's (or yours) is removed, hostile
+    // or not, animals included. A hook on the spawner itself would be the
+    // thorough version; this is the slice's.
     void keepArenaQuiet()
     {
-        if (g_run.state != RUN_FIGHTING || g_run.runners.empty() || g_frame % 60 != 0)
+        if ((g_run.state != RUN_FIGHTING && g_run.state != RUN_BETWEEN) || g_run.runners.empty() ||
+            g_frame % 30 != 0)
             return;
         Character* r = g_run.runners[0];
         lektor<RootObject*> found;
         ou->getCharactersWithinSphere(found, g_run.arena, ARENA_RADIUS_M * METRE, ARENA_RADIUS_M * METRE, 0.0f,
-                                      80, 80, NULL);
+                                      200, 200, NULL);
         for (uint32_t i = 0; i < found.size(); ++i)
         {
             Character* c = static_cast<Character*>(found[i]);
-            if (!c || contains(g_run.runners, c) || contains(g_run.enemies, c) || c->isDead())
+            if (!c || contains(g_run.runners, c) || contains(g_run.allEnemies, c))
                 continue;
-            if (c->getFaction() == r->getFaction() || !c->isEnemy(r, false))
+            if (c->getFaction() == r->getFaction())
                 continue;
             logLine("arena: removed a stranger, " + c->getName() + " of " +
                     (c->getFaction() ? c->getFaction()->getName() : std::string("(none)")));
@@ -316,20 +340,29 @@ namespace
         Platoon* made = ou->theFactory->createRandomSquad(them, at, NULL, 20, NULL, squad, NULL, NULL, NULL, false,
                                                           g_run.runners[0]->getHandle(), NULL, 1.0f, SQ_ROAMING,
                                                           false);
-        // The squad's people: that faction, right where it was made.
+        // The squad's people: that faction, right where it was made, up, and
+        // not from an earlier fight (fight 2 counted fight 1's downed bandit,
+        // second run).
         lektor<RootObject*> found;
         ou->getCharactersWithinSphere(found, at, 30.0f * METRE, 30.0f * METRE, 0.0f, 40, 40, NULL);
         for (uint32_t i = 0; i < found.size(); ++i)
         {
             Character* c = static_cast<Character*>(found[i]);
-            if (c && c->getFaction() == them && !c->isDead())
+            if (c && c->getFaction() == them && !out(c) && !contains(g_run.allEnemies, c))
+            {
                 g_run.enemies.push_back(c);
+                g_run.allEnemies.push_back(c);
+            }
         }
         GameData* kit = data(FIRST_AID);
         for (size_t i = 0; i < g_run.enemies.size(); ++i)
             for (int k = 0; k < n.firstAidKits; ++k)
                 if (Item* it = makeItem(kit, NULL, NULL))
                     g_run.enemies[i]->giveItem(it, false, true);
+        // An explicit order as well as the squad's target: with only the
+        // target, fight 2's bandits never came in 300 s (second run).
+        for (size_t i = 0; i < g_run.enemies.size(); ++i)
+            g_run.enemies[i]->attackTarget(g_run.runners[0]);
         std::ostringstream o;
         o << n.label << ": squad " << (made ? "made" : "NOT made") << ", " << g_run.enemies.size() << " enemies";
         logLine(o.str());
@@ -354,7 +387,10 @@ namespace
                            p->getRobotLimbState() == LIMB_STUMP))
                     continue;
                 p->flesh = p->maxHealth();
-                p->fleshStun = p->maxHealth();
+                // fleshStun is stun *damage*, 0 when fine: setting it to the
+                // maximum knocked the runner out (fourth run; the "7" on Kenshi's
+                // panel in the second).
+                p->fleshStun = 0.0f;
                 p->updateDerivedHealths();
             }
             m->blood = m->getMaxBlood();
@@ -380,6 +416,19 @@ namespace
             logLine("run complete");
             return;
         }
+        // The last fight's enemies leave once you move on (loot them first).
+        // Knocked out isn't for good: fight 1's bandit got up again and
+        // wandered into fight 2 (second run).
+        int left = 0;
+        for (size_t i = 0; i < g_run.enemies.size(); ++i)
+            if (g_run.enemies[i])
+            {
+                ou->destroy(g_run.enemies[i], false, "Kenshi Rogue: the fight's over");
+                ++left;
+            }
+        if (left)
+            logLine("the last fight's " + toStr(float(left)) + " enemies left");
+        g_run.enemies.clear();
         g_run.node = next;
         const Node& n = NODES[next];
         if (n.kind == NODE_REST)
@@ -402,6 +451,22 @@ namespace
         at.z += offsetZ_m * METRE;
         g_run = Run();
         g_run.arena = at;
+        // Your own characters stand aside: the arena is where you are (ground
+        // you chose), and the runner fights alone. Third run: 200 m away put
+        // the runner on a mesa the bandit couldn't reach; second run: a
+        // skeleton beside the runner fought fight 1 with them.
+        const lektor<Character*>& yours = ou->player->getAllPlayerCharacters();
+        std::vector<Character*> aside(yours.begin(), yours.end());
+        for (size_t i = 0; i < aside.size(); ++i)
+        {
+            Ogre::Vector3 from = aside[i]->getPosition();
+            Ogre::Vector3 to(from.x - STAND_ASIDE_M * METRE, from.y, from.z + float(i) * 3.0f * METRE);
+            bool moved = park(aside[i], to);
+            std::ostringstream o;
+            o << "stand aside: " << aside[i]->getName() << (moved ? " moved" : " NOT moved") << " from "
+              << int(from.x) << "," << int(from.z) << " to " << int(to.x) << "," << int(to.z);
+            logLine(o.str());
+        }
         Character* r = createRunner(at);
         if (!r)
         {
@@ -423,6 +488,16 @@ namespace
     {
         if (g_run.state != RUN_FIGHTING || g_frame % 15 != 0)
             return;
+        // The order again every 10 s, for whoever is up (getting up from a
+        // knockout, or distracted).
+        static DWORD lastOrder = 0;
+        if (GetTickCount() - lastOrder > 10000 && !g_run.runners.empty() && !out(g_run.runners[0]))
+        {
+            lastOrder = GetTickCount();
+            for (size_t i = 0; i < g_run.enemies.size(); ++i)
+                if (!out(g_run.enemies[i]))
+                    g_run.enemies[i]->attackTarget(g_run.runners[0]);
+        }
         bool enemiesOut = true, runnersOut = true;
         for (size_t i = 0; i < g_run.enemies.size(); ++i)
             enemiesOut = enemiesOut && out(g_run.enemies[i]);
@@ -773,6 +848,52 @@ namespace
             atWrite("INFO", o.str());
             return true;
         }
+        if (cmd == "select_runner") // the runner selected, so Kenshi's own panel shows their health
+        {
+            if (!g_run.runners.empty())
+            {
+                ou->player->unselectAll();
+                ou->player->selectObject(g_run.runners[0], false);
+                ou->player->objectSelected(g_run.runners[0], true);
+                ou->player->focusCamera(g_run.runners[0]->getPosition());
+            }
+            return true;
+        }
+        if (cmd == "medraw") // medraw: every body part's fields as KenshiLib names them, to compare with Kenshi's panel
+        {
+            Character* r = g_run.runners.empty() ? NULL : g_run.runners[0];
+            MedicalSystem* m = r ? r->getMedical() : NULL;
+            for (int k = 0; m && k < m->getPartCount(); ++k)
+            {
+                MedicalSystem::HealthPartStatus* p = m->getPart((unsigned __int64)k);
+                if (!p || !p->getData())
+                    continue;
+                std::ostringstream o;
+                o << p->getData()->name << ": type " << int(p->whatAmI) << " flesh " << p->flesh << " stun "
+                  << p->fleshStun << " bandaging " << p->bandaging << " max() " << p->maxHealth() << " _max "
+                  << p->_maxHealth << " HPMult " << p->HPMult << " derived% " << p->derivedFleshHealthPercent
+                  << " wear " << p->wearDamage << " raw:";
+                const float* f = reinterpret_cast<const float*>(reinterpret_cast<const char*>(p) + 0x30);
+                for (int j = 0; j < 14; ++j)
+                    o << " " << f[j];
+                atWrite("INFO", o.str());
+            }
+            return true;
+        }
+        if (cmd == "people") // people: your characters, where they are, how far from the arena
+        {
+            const lektor<Character*>& ps = ou->player->getAllPlayerCharacters();
+            std::ostringstream o;
+            o << ps.size() << " player characters:";
+            for (uint32_t i = 0; i < ps.size(); ++i)
+            {
+                Ogre::Vector3 p = ps[i]->getPosition();
+                o << " [" << ps[i]->getName() << " at " << int(p.x) << "," << int(p.y) << "," << int(p.z) << ", "
+                  << int(p.distance(g_run.arena) / METRE) << " m from the arena, " << (out(ps[i]) ? "out" : "up") << "]";
+            }
+            atWrite("INFO", o.str());
+            return true;
+        }
         if (cmd == "focus") // camera on the runner
         {
             if (!g_run.runners.empty())
@@ -949,6 +1070,9 @@ __declspec(dllexport) void startPlugin()
         return;
     }
     g_createChar = (CreateCharFn)KenshiLib::GetRealAddress(&RootObjectFactory::createRandomCharacter);
+    g_handCtor = (HandCtorFn)KenshiLib::GetRealAddress(
+        static_cast<hand* (hand::*)(unsigned int, unsigned int, itemType, unsigned int, unsigned int)>(
+            &hand::_CONSTRUCTOR));
     g_createItem = (CreateItemFn)KenshiLib::GetRealAddress(
         static_cast<Item* (RootObjectFactory::*)(GameData*, const hand&, GameData*, GameData*, int, Faction*)>(
             &RootObjectFactory::createItem));
